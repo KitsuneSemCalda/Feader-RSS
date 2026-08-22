@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kitsunesemcalda.feader-rss",
+  "name": "Feader RSS",
+  "version": "0.1.0",
+  "author": "Feader",
+  "license": "MIT",
+  "description": "Persistent RSS reader for the Omarchy shell.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Feader RSS",
+    "description": "Read and keep RSS articles locally.",
+    "category": "Information",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}
