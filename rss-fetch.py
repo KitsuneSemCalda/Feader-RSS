@@ -3,10 +3,12 @@
 import argparse
 import hashlib
 import html
+import json
 import re
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 
 
 def text(node, *names):
@@ -20,7 +22,8 @@ def text(node, *names):
 def clean(value):
     value = html.unescape(value or "")
     value = re.sub(r"<[^>]+>", " ", value)
-    return " ".join(value.split())
+    value = " ".join(value.split())
+    return re.sub(r"\s+([,.;:!?])", r"\1", value)
 
 
 def parse_feed(name, url):
@@ -48,20 +51,93 @@ def parse_feed(name, url):
     return items
 
 
+class ArticleParser(HTMLParser):
+    """Extract readable text from an HTML article using only the stdlib."""
+
+    BLOCK_TAGS = {"article", "br", "div", "h1", "h2", "h3", "h4", "li", "p", "pre", "section"}
+    SKIP_TAGS = {"aside", "footer", "form", "header", "nav", "script", "style", "svg"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.title_parts = []
+        self.skip_depth = 0
+        self.in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+        if tag == "title":
+            self.in_title = True
+        if self.skip_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self.skip_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+        if tag == "title":
+            self.in_title = False
+        if tag in self.SKIP_TAGS and self.skip_depth:
+            self.skip_depth -= 1
+
+    def handle_data(self, data):
+        if self.skip_depth:
+            return
+        value = " ".join(data.split())
+        if not value:
+            return
+        self.parts.append(value + " ")
+        if self.in_title:
+            self.title_parts.append(value)
+
+    def result(self):
+        content = re.sub(r"[ \t]+", " ", "".join(self.parts))
+        content = re.sub(r"\n[ \t]+", "\n", content)
+        content = re.sub(r"\s+([,.;:!?])", r"\1", content)
+        content = re.sub(r"\n{3,}", "\n\n", content).strip()
+        title = " ".join(self.title_parts).strip()
+        if not title:
+            title = next((line.strip() for line in content.splitlines() if line.strip()), "Article")
+        return title, content
+
+
+def fetch_article(url):
+    request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        raw = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+    parser = ArticleParser()
+    parser.feed(raw.decode(charset, errors="replace"))
+    title, content = parser.result()
+    return {"url": url, "title": title, "content": content}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--article")
     parser.add_argument("feeds", nargs="*")
     args = parser.parse_args()
+    if args.article:
+        try:
+            print(json.dumps(fetch_article(args.article), ensure_ascii=False))
+        except Exception as error:
+            print(json.dumps({"error": str(error), "url": args.article}, ensure_ascii=False))
+            return 1
+        return 0
     items = []
+    errors = []
     for index in range(0, len(args.feeds) - 1, 2):
         name, url = args.feeds[index:index + 2]
         try:
             items.extend(parse_feed(name, url))
         except Exception as error:
+            errors.append({"feed": name, "url": url, "error": str(error)})
             print(f"{name}: {error}", file=sys.stderr)
     items.sort(key=lambda item: item.get("published", ""), reverse=True)
-    print(__import__("json").dumps({"items": items[:args.limit]}, ensure_ascii=False))
+    print(json.dumps({"items": items[:args.limit], "errors": errors}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

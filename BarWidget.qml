@@ -23,6 +23,10 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.close()
   }
 
+  function toggle() {
+    if (panelLoader.item) panelLoader.item.toggle()
+  }
+
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
@@ -51,8 +55,8 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰓶"
-    tooltipText: "Feader RSS"
+    text: panelLoader.item ? panelLoader.item.label : "󰓶"
+    tooltipText: panelLoader.item ? panelLoader.item.unreadSummary : "Feader RSS"
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) panelLoader.item.refresh()
       else if (buttonCode === Qt.RightButton) panelLoader.item.openAllUnread()

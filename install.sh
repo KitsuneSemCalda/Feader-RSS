@@ -16,12 +16,25 @@ fi
 printf '%s\n' "Validando o plugin..."
 omarchy plugin validate "${plugin_root}"
 
+bash "${plugin_root}/backup.sh"
+
 if [[ -e "${destination}" && ! -d "${destination}" ]]; then
   printf '%s\n' "Erro: o destino existe e não é um diretório: ${destination}" >&2
   exit 1
 fi
 
+if [[ -L "${destination}" ]]; then
+  printf '%s\n' "Erro: o destino é um symlink; recusei limpar ${destination}." >&2
+  exit 1
+fi
+
 mkdir -p "${destination}"
+
+# Remove only files owned by this plugin before copying the new version. Keep
+# .git, the user feed configuration, and the persisted article state untouched.
+for file in manifest.json BarWidget.qml Panel.qml rss-fetch.py README.md example-config.json; do
+  rm -f "${destination}/${file}"
+done
 
 # Keep the installed checkout limited to the plugin contract and its runtime
 # helper. This avoids copying repository metadata or development artifacts.

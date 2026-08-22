@@ -1,7 +1,5 @@
 {
   "maxItems": 200,
-  "feeds": [
-    { "name": "LWN", "url": "https://lwn.net/headlines/rss" },
-    { "name": "Omarchy", "url": "https://omarchy.org/feed.xml" }
-  ]
+  "refreshMinutes": 5,
+  "feeds": []
 }
