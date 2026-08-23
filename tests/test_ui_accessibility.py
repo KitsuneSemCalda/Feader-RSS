@@ -121,7 +121,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
     def test_tray_and_refresh_interval_use_unread_feed_count(self):
         self.assertIn('readonly property string label: unreadCount', PANEL)
         self.assertIn('readonly property int refreshSeconds: Math.max(60, Math.min(300', PANEL)
-        self.assertIn('text: panelLoader.item ? panelLoader.item.label : "󰓶"', BAR)
+        self.assertIn('text: panelLoader.item ? panelLoader.item.label : ""', BAR)
         self.assertIn('tooltipText: panelLoader.item ? panelLoader.item.unreadSummary', BAR)
 
     def test_article_list_uses_theme_surface_tokens(self):

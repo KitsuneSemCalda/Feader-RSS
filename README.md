@@ -2,6 +2,15 @@
 
 A persistent RSS reader for the Omarchy shell, built as a Quickshell plugin.
 
+<p align="center">
+  <img src="screenshots/bar-widget.png" alt="Feader RSS bar widget showing the unread count" height="48">
+</p>
+
+<p align="center">
+  <img src="screenshots/panel-articles.png" alt="Feader RSS article list panel" width="45%">
+  <img src="screenshots/panel-settings.png" alt="Feader RSS feed configuration panel" width="45%">
+</p>
+
 ## Local installation
 
 To install a local copy during development:

@@ -56,7 +56,7 @@ Panel {
     }
     return Object.keys(feeds).filter(function(feed) { return feed !== "" }).length
   }
-  readonly property string label: unreadCount ? "󰓶 " + unreadCount : "󰓶"
+  readonly property string label: unreadCount ? " " + unreadCount : ""
   readonly property string unreadSummary: unreadFeedCount + " feeds unread · " + unreadCount + " articles"
   readonly property int refreshSeconds: Math.max(60, Math.min(300, Number(config.refreshMinutes || 5) * 60))
   readonly property var visibleArticles: articles.filter(function(article) { return articleMatches(article) })
@@ -314,7 +314,7 @@ Panel {
     Quickshell.execDetached([
       omarchyPath + "/bin/omarchy-notification-send",
       "--app-name", "Feader RSS",
-      "-g", "󰓶",
+      "-g", "",
       "-u", "low",
       headline,
       description
