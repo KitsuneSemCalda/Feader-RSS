@@ -57,8 +57,8 @@ Create `~/.config/omarchy/rss-reader.json`:
 }
 ```
 
-`refreshMinutes` aceita valores entre `1` e `5`; o padrão é atualizar os feeds
-automaticamente a cada 5 minutos.
+`refreshMinutes` accepts values between `1` and `5`; the default is to refresh
+feeds automatically every 5 minutes.
 
 You can also open the reader and choose **Configure feeds** to edit the feed
 name and URL without leaving the application. The configuration screen supports

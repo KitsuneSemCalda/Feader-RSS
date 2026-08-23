@@ -9,22 +9,22 @@ plugin_id="io.github.kitsunesemcalda.feader-rss"
 destination="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy/plugins/${plugin_id}"
 
 if ! command -v omarchy >/dev/null 2>&1; then
-  printf '%s\n' "Erro: o comando 'omarchy' não foi encontrado." >&2
+  printf '%s\n' "Error: 'omarchy' command not found." >&2
   exit 1
 fi
 
-printf '%s\n' "Validando o plugin..."
+printf '%s\n' "Validating the plugin..."
 omarchy plugin validate "${plugin_root}"
 
 bash "${plugin_root}/scripts/backup.sh"
 
 if [[ -e "${destination}" && ! -d "${destination}" ]]; then
-  printf '%s\n' "Erro: o destino existe e não é um diretório: ${destination}" >&2
+  printf '%s\n' "Error: destination exists and is not a directory: ${destination}" >&2
   exit 1
 fi
 
 if [[ -L "${destination}" ]]; then
-  printf '%s\n' "Erro: o destino é um symlink; recusei limpar ${destination}." >&2
+  printf '%s\n' "Error: destination is a symlink; refusing to clean ${destination}." >&2
   exit 1
 fi
 
@@ -46,6 +46,6 @@ install -m 0644 \
   "${plugin_root}/rss-fetch.py" \
   "${destination}/"
 
-printf '%s\n' "Plugin copiado para ${destination}"
+printf '%s\n' "Plugin copied to ${destination}"
 omarchy plugin enable "${plugin_id}" right
-printf '%s\n' "Feader RSS habilitado na seção direita da barra."
+printf '%s\n' "Feader RSS enabled in the right bar section."

@@ -4,7 +4,7 @@
   "name": "Feader RSS",
   "version": "0.1.0",
   "author": "Feader",
-  "license": "MIT",
+  "license": "BSD-3-Clause",
   "description": "Persistent RSS reader for the Omarchy shell.",
   "kinds": ["bar-widget"],
   "entryPoints": {

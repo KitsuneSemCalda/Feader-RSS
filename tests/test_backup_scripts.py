@@ -24,14 +24,14 @@ class BackupScriptTests(unittest.TestCase):
             env = {**os.environ, "XDG_CONFIG_HOME": str(config_home), "XDG_STATE_HOME": str(state_home)}
 
             created = subprocess.run([str(ROOT / "scripts/backup.sh")], env=env, check=True, capture_output=True, text=True)
-            self.assertIn("Backup criado", created.stdout)
+            self.assertIn("Backup created", created.stdout)
             backups = sorted((state_home / "omarchy/rss-reader/backups").iterdir())
             self.assertEqual(len(backups), 1)
 
             config_file.write_text("changed")
             state_file.write_text("changed")
             restored = subprocess.run([str(ROOT / "scripts/restore.sh"), str(backups[0])], env=env, check=True, capture_output=True, text=True)
-            self.assertIn("Backup restaurado", restored.stdout)
+            self.assertIn("Backup restored", restored.stdout)
             self.assertEqual(json.loads(config_file.read_text())["feeds"][0]["name"], "One")
             self.assertTrue(json.loads(state_file.read_text())["items"][0]["read"])
 

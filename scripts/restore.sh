@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 || ! -d "$1" ]]; then
-  printf '%s\n' "Uso: ./scripts/restore.sh /caminho/para/backup" >&2
+  printf '%s\n' "Usage: ./scripts/restore.sh /path/to/backup" >&2
   exit 2
 fi
 
@@ -20,4 +20,4 @@ if [[ -f "${backup_dir}/items.json" ]]; then
   cp -p "${backup_dir}/items.json" "${state_file}"
 fi
 
-printf '%s\n' "Backup restaurado de ${backup_dir}"
+printf '%s\n' "Backup restored from ${backup_dir}"

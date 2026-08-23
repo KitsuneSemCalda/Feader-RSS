@@ -6,7 +6,7 @@ state_file="${XDG_STATE_HOME:-${HOME}/.local/state}/omarchy/rss-reader/items.jso
 backup_root="${XDG_STATE_HOME:-${HOME}/.local/state}/omarchy/rss-reader/backups"
 
 if [[ ! -f "${config_file}" && ! -f "${state_file}" ]]; then
-  printf '%s\n' "Nenhum dado do Feader RSS para salvar."
+  printf '%s\n' "No Feader RSS data to back up."
   exit 0
 fi
 
@@ -23,4 +23,4 @@ if [[ -f "${state_file}" ]]; then
   cp -p "${state_file}" "${backup_dir}/items.json"
 fi
 
-printf '%s\n' "Backup criado em ${backup_dir}"
+printf '%s\n' "Backup created at ${backup_dir}"
