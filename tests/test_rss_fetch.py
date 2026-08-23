@@ -2,9 +2,11 @@ import importlib.util
 import io
 import json
 import socket
+import ssl
 import unittest
+import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 MODULE_PATH = Path(__file__).parents[1] / "rss-fetch.py"
@@ -244,6 +246,124 @@ class ResponseSizeLimitTests(unittest.TestCase):
             article = rss_fetch.fetch_article("https://example.org/ok")
 
         self.assertIn("A", article["content"])
+
+
+class DnsRebindingSecurityTests(unittest.TestCase):
+    """The actual TCP connection must go to the address that was validated,
+    not to whatever a second DNS lookup returns (DNS-rebinding SSRF)."""
+
+    class _StopAtConnect(Exception):
+        pass
+
+    def test_open_safe_connects_to_the_validated_address_only_once(self):
+        # Simulate a rebinding host: first DNS answer (used for validation)
+        # is public, a hypothetical second answer would be a private IP.
+        # If the code path ever re-resolved the hostname to connect, it
+        # would see the second, dangerous answer.
+        answers = iter(["93.184.216.34", "127.0.0.1"])
+        call_count = {"n": 0}
+
+        def fake_dns(host, *args, **kwargs):
+            call_count["n"] += 1
+            ip = next(answers)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+        captured = {}
+
+        def fake_create_connection(address, *args, **kwargs):
+            captured["address"] = address
+            raise self._StopAtConnect()
+
+        with patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_dns), \
+             patch.object(rss_fetch.socket, "create_connection", side_effect=fake_create_connection):
+            with self.assertRaises(self._StopAtConnect):
+                rss_fetch.open_safe("http://rebinding.example/feed.xml", timeout=5)
+
+        self.assertEqual(captured["address"], ("93.184.216.34", 80))
+        self.assertEqual(call_count["n"], 1, "hostname must only be resolved once, at validation time")
+
+    def test_pinned_http_connection_dials_the_pinned_ip_not_the_hostname(self):
+        conn = rss_fetch.PinnedHTTPConnection("attacker-controlled.example", 8080, pinned_ip="203.0.113.9", timeout=5)
+        with patch.object(rss_fetch.socket, "create_connection", return_value=MagicMock()) as create_conn:
+            conn.connect()
+        create_conn.assert_called_once_with(("203.0.113.9", 8080), 5, None)
+
+    def test_pinned_https_connection_dials_pinned_ip_but_keeps_sni_on_hostname(self):
+        conn = rss_fetch.PinnedHTTPSConnection("original-host.example", 443, pinned_ip="203.0.113.9", timeout=5)
+        wrapped_sock = MagicMock()
+        with patch.object(rss_fetch.socket, "create_connection", return_value=MagicMock()) as create_conn, \
+             patch.object(conn, "_context") as fake_context:
+            fake_context.wrap_socket.return_value = wrapped_sock
+            conn.connect()
+
+        create_conn.assert_called_once_with(("203.0.113.9", 443), 5, None)
+        fake_context.wrap_socket.assert_called_once()
+        self.assertEqual(fake_context.wrap_socket.call_args.kwargs["server_hostname"], "original-host.example")
+        self.assertIs(conn.sock, wrapped_sock)
+
+    def test_pinned_http_handler_refuses_to_open_a_request_without_a_pinned_address(self):
+        handler = rss_fetch._PinnedHTTPHandler()
+        request = urllib.request.Request("http://example.org/feed.xml")
+        with self.assertRaises(ValueError):
+            handler.http_open(request)
+
+    def test_pinned_https_handler_refuses_to_open_a_request_without_a_pinned_address(self):
+        handler = rss_fetch._PinnedHTTPSHandler()
+        request = urllib.request.Request("https://example.org/feed.xml")
+        with self.assertRaises(ValueError):
+            handler.https_open(request)
+
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({"example.org": "93.184.216.34"}))
+    def test_open_safe_stamps_the_request_with_the_validated_address(self, _dns):
+        captured = {}
+
+        def fake_open(request, timeout=None):
+            captured["pinned_ip"] = getattr(request, "pinned_ip", None)
+            return Response()
+
+        with patch.object(rss_fetch._OPENER, "open", side_effect=fake_open):
+            rss_fetch.open_safe("https://example.org/feed.xml", timeout=5)
+
+        self.assertEqual(captured["pinned_ip"], "93.184.216.34")
+
+    def test_redirect_handler_re_pins_the_new_request_to_the_revalidated_address(self):
+        handler = rss_fetch._SafeRedirectHandler()
+        original = urllib.request.Request("https://public.example/feed.xml")
+        original.pinned_ip = "93.184.216.34"
+
+        with patch.object(rss_fetch.socket, "getaddrinfo",
+                           side_effect=fake_getaddrinfo({"public2.example": "93.184.216.99"})):
+            new_request = handler.redirect_request(
+                original, None, 302, "Found", {}, "https://public2.example/feed2.xml",
+            )
+
+        self.assertEqual(new_request.pinned_ip, "93.184.216.99")
+
+    def test_redirect_handler_blocks_a_hop_to_a_rebound_private_address(self):
+        handler = rss_fetch._SafeRedirectHandler()
+        original = urllib.request.Request("https://public.example/feed.xml")
+        original.pinned_ip = "93.184.216.34"
+
+        with patch.object(rss_fetch.socket, "getaddrinfo",
+                           side_effect=fake_getaddrinfo({"rebound.example": "10.0.0.9"})):
+            with self.assertRaises(ValueError):
+                handler.redirect_request(
+                    original, None, 302, "Found", {}, "http://rebound.example/internal",
+                )
+
+
+class TlsVerificationTests(unittest.TestCase):
+    """The pinned connection must not weaken TLS certificate/hostname checks."""
+
+    def test_pinned_https_connection_uses_a_verifying_ssl_context_by_default(self):
+        conn = rss_fetch.PinnedHTTPSConnection("host.example", 443, pinned_ip="203.0.113.9", timeout=5)
+        self.assertEqual(conn._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(conn._context.check_hostname)
+
+    def test_https_opener_shares_a_verifying_context_across_requests(self):
+        handler = next(h for h in rss_fetch._OPENER.handlers if isinstance(h, rss_fetch._PinnedHTTPSHandler))
+        self.assertEqual(handler._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(handler._context.check_hostname)
 
 
 if __name__ == "__main__":

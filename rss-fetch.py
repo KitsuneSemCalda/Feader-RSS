@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fetch a small, dependency-free RSS/Atom snapshot for the Quickshell UI."""
 import argparse
+import functools
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import re
@@ -28,12 +30,11 @@ def _is_global_ip(ip_str):
 def require_safe_url(url):
     """Reject unsafe schemes and any host that resolves to a non-public address.
 
-    This is re-run on every redirect target, so a feed cannot 302 its way
-    from an allowed public host to an internal/loopback/link-local one.
-    Note: since DNS is re-resolved by the underlying connection after this
-    check, a host that changes its DNS answer between validation and the
-    actual TCP connect (DNS rebinding) is not fully closed off by this
-    check alone.
+    Returns the validated hostname's first resolved address so the caller
+    can pin the actual connection to it (see PinnedHTTPConnection below):
+    without pinning, urllib re-resolves the hostname at connect time, and a
+    DNS-rebinding host could hand back a private/loopback address for that
+    second lookup even though this check saw only public ones.
     """
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
@@ -50,24 +51,89 @@ def require_safe_url(url):
         ip_str = info[4][0]
         if not _is_global_ip(ip_str):
             raise ValueError(f"refusing to contact non-public address: {ip_str}")
+    return resolved[0][4][0]
+
+
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connect to a pre-validated IP instead of re-resolving self.host."""
+
+    def __init__(self, *args, pinned_ip, **kwargs):
+        self._pinned_ip = pinned_ip
+        super().__init__(*args, **kwargs)
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Like PinnedHTTPConnection, but keeps TLS SNI/verification on the hostname."""
+
+    def __init__(self, *args, pinned_ip, **kwargs):
+        self._pinned_ip = pinned_ip
+        super().__init__(*args, **kwargs)
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self._tunnel()
+        server_hostname = self._tunnel_host if self._tunnel_host else self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        ip = getattr(req, "pinned_ip", None)
+        if not ip:
+            raise ValueError("missing pinned address for request")
+        return self.do_open(functools.partial(PinnedHTTPConnection, pinned_ip=ip), req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        ip = getattr(req, "pinned_ip", None)
+        if not ip:
+            raise ValueError("missing pinned address for request")
+        return self.do_open(
+            functools.partial(PinnedHTTPSConnection, pinned_ip=ip),
+            req,
+            context=self._context,
+        )
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Re-validate the scheme and destination of every redirect target."""
+    """Re-validate the scheme and destination of every redirect target, and
+    pin the redirected request to the freshly-validated address."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        require_safe_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        pinned_ip = require_safe_url(newurl)
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req.pinned_ip = pinned_ip
+        return new_req
 
 
 _OPENER = urllib.request.build_opener(
     urllib.request.UnknownHandler,
-    urllib.request.HTTPHandler,
-    urllib.request.HTTPSHandler,
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler,
     urllib.request.HTTPDefaultErrorHandler,
     urllib.request.HTTPErrorProcessor,
     _SafeRedirectHandler,
 )
+
+
+def open_safe(url, timeout):
+    """Validate the URL, pin the connection to the validated address, and open it."""
+    pinned_ip = require_safe_url(url)
+    request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
+    request.pinned_ip = pinned_ip
+    return _OPENER.open(request, timeout=timeout)
 
 
 def _read_capped(response):
@@ -94,9 +160,7 @@ def clean(value):
 
 
 def parse_feed(name, url):
-    require_safe_url(url)
-    request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
-    with _OPENER.open(request, timeout=15) as response:
+    with open_safe(url, timeout=15) as response:
         root = ET.fromstring(_read_capped(response))
     channel = root.find("channel")
     entries = list(channel) if channel is not None else list(root)
@@ -172,9 +236,7 @@ class ArticleParser(HTMLParser):
 
 
 def fetch_article(url):
-    require_safe_url(url)
-    request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
-    with _OPENER.open(request, timeout=20) as response:
+    with open_safe(url, timeout=20) as response:
         raw = _read_capped(response)
         charset = response.headers.get_content_charset() or "utf-8"
     parser = ArticleParser()
