@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import socket
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +22,19 @@ RSS = b'''<?xml version="1.0"?>
     <description><![CDATA[<p>Hello <b>RSS</b>.</p>]]></description>
   </item>
 </channel></rss>'''
+
+
+def fake_getaddrinfo(ip_by_host):
+    """Build a socket.getaddrinfo replacement that never touches the network."""
+
+    def _fake(host, *args, **kwargs):
+        ip = ip_by_host.get(host)
+        if ip is None:
+            raise socket.gaierror(f"no fake DNS entry for {host}")
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    return _fake
 
 
 class Response:
@@ -48,8 +62,9 @@ class RssFetchTests(unittest.TestCase):
         self.assertNotIn("Menu", content)
         self.assertNotIn("hidden()", content)
 
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({"example.org": "93.184.216.34"}))
     @patch.object(rss_fetch._OPENER, "open", return_value=Response())
-    def test_parse_feed_normalizes_article_fields(self, _urlopen):
+    def test_parse_feed_normalizes_article_fields(self, _urlopen, _dns):
         items = rss_fetch.parse_feed("Example", "https://example.org/feed.xml")
 
         self.assertEqual(len(items), 1)
@@ -58,8 +73,9 @@ class RssFetchTests(unittest.TestCase):
         self.assertEqual(items[0]["feed"], "Example")
         self.assertFalse(items[0]["read"])
 
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({"example.org": "93.184.216.34"}))
     @patch.object(rss_fetch._OPENER, "open", side_effect=OSError("offline"))
-    def test_main_keeps_json_output_when_a_feed_fails(self, _urlopen):
+    def test_main_keeps_json_output_when_a_feed_fails(self, _urlopen, _dns):
         with patch("sys.argv", ["rss-fetch.py", "--limit", "2", "Offline", "https://example.org/feed.xml"]):
             with patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 rss_fetch.main()
@@ -90,7 +106,10 @@ class UrlSchemeSecurityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rss_fetch.require_safe_url(url)
 
-    def test_require_safe_url_allows_http_and_https(self):
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({
+        "example.org": "93.184.216.34",
+    }))
+    def test_require_safe_url_allows_http_and_https(self, _dns):
         rss_fetch.require_safe_url("http://example.org/feed.xml")
         rss_fetch.require_safe_url("https://example.org/feed.xml")
 
@@ -141,6 +160,58 @@ class UrlSchemeSecurityTests(unittest.TestCase):
         self.assertIn("scheme", payload["error"])
 
 
+class SsrfDestinationSecurityTests(unittest.TestCase):
+    """A malicious/compromised feed must not be able to reach internal network destinations."""
+
+    NON_PUBLIC_URLS = [
+        "http://127.0.0.1/",
+        "http://127.0.0.1:8080/admin",
+        "http://localhost/",
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata endpoint
+        "http://192.168.1.1/",
+        "http://10.0.0.5/",
+        "http://172.16.0.5/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://0.0.0.0/",
+    ]
+
+    def test_require_safe_url_rejects_loopback_private_and_link_local_ips(self):
+        for url in self.NON_PUBLIC_URLS:
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    rss_fetch.require_safe_url(url)
+
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({
+        "public.example": "93.184.216.34",
+    }))
+    def test_require_safe_url_allows_a_hostname_resolving_to_a_public_ip(self, _dns):
+        rss_fetch.require_safe_url("https://public.example/feed.xml")
+
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({
+        "internal.example": "10.0.0.5",
+    }))
+    def test_require_safe_url_rejects_a_hostname_resolving_to_a_private_ip(self, _dns):
+        with self.assertRaises(ValueError):
+            rss_fetch.require_safe_url("https://internal.example/feed.xml")
+
+    @patch.object(rss_fetch.socket, "getaddrinfo", side_effect=fake_getaddrinfo({
+        "public.example": "93.184.216.34",
+    }))
+    def test_redirect_from_public_host_to_private_ip_is_blocked(self, _dns):
+        # Simulates a public-looking feed 302-redirecting to an internal address:
+        # the redirect handler must re-run require_safe_url on the new target.
+        rss_fetch.require_safe_url("https://public.example/feed.xml")
+        with self.assertRaises(ValueError):
+            rss_fetch.require_safe_url("http://169.254.169.254/latest/meta-data/")
+
+    @patch.object(rss_fetch._OPENER, "open")
+    def test_fetch_article_never_opens_a_loopback_url(self, urlopen):
+        with self.assertRaises(ValueError):
+            rss_fetch.fetch_article("http://127.0.0.1/secret")
+        urlopen.assert_not_called()
+
+
 class ResponseSizeLimitTests(unittest.TestCase):
     """A malicious or misbehaving server must not be able to exhaust memory."""
 
@@ -156,15 +227,23 @@ class ResponseSizeLimitTests(unittest.TestCase):
         def __exit__(self, *_):
             return False
 
-    def test_fetch_article_caps_bytes_read_from_the_socket(self):
+    def test_fetch_article_rejects_oversized_responses_instead_of_truncating(self):
         oversized = b"<html><body><p>" + b"A" * (rss_fetch.MAX_RESPONSE_BYTES * 2) + b"</p></body></html>"
         response = self.HugeResponse(oversized)
 
         with patch.object(rss_fetch._OPENER, "open", return_value=response):
-            article = rss_fetch.fetch_article("https://example.org/huge")
+            with self.assertRaises(ValueError):
+                rss_fetch.fetch_article("https://example.org/huge")
 
-        # response.read(MAX_RESPONSE_BYTES) must never pull more than the cap into memory
-        self.assertLessEqual(len(article["content"]), rss_fetch.MAX_RESPONSE_BYTES)
+    def test_fetch_article_accepts_a_response_exactly_at_the_limit(self):
+        payload = b"<html><body><p>" + b"A" * (rss_fetch.MAX_RESPONSE_BYTES - 100) + b"</p></body></html>"
+        self.assertLessEqual(len(payload), rss_fetch.MAX_RESPONSE_BYTES)
+        response = self.HugeResponse(payload)
+
+        with patch.object(rss_fetch._OPENER, "open", return_value=response):
+            article = rss_fetch.fetch_article("https://example.org/ok")
+
+        self.assertIn("A", article["content"])
 
 
 if __name__ == "__main__":

@@ -3,8 +3,10 @@
 import argparse
 import hashlib
 import html
+import ipaddress
 import json
 import re
+import socket
 import sys
 import urllib.request
 from urllib.parse import urlparse
@@ -15,14 +17,43 @@ ALLOWED_SCHEMES = {"http", "https"}
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
+def _is_global_ip(ip_str):
+    ip = ipaddress.ip_address(ip_str)
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+    )
+
+
 def require_safe_url(url):
-    scheme = urlparse(url).scheme.lower()
+    """Reject unsafe schemes and any host that resolves to a non-public address.
+
+    This is re-run on every redirect target, so a feed cannot 302 its way
+    from an allowed public host to an internal/loopback/link-local one.
+    Note: since DNS is re-resolved by the underlying connection after this
+    check, a host that changes its DNS answer between validation and the
+    actual TCP connect (DNS rebinding) is not fully closed off by this
+    check alone.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
         raise ValueError(f"unsupported URL scheme: {scheme or '(none)'}")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL is missing a hostname")
+    try:
+        resolved = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as error:
+        raise ValueError(f"could not resolve host: {hostname}") from error
+    for info in resolved:
+        ip_str = info[4][0]
+        if not _is_global_ip(ip_str):
+            raise ValueError(f"refusing to contact non-public address: {ip_str}")
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Re-validate the scheme of every redirect target, not just the initial URL."""
+    """Re-validate the scheme and destination of every redirect target."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         require_safe_url(newurl)
@@ -37,6 +68,14 @@ _OPENER = urllib.request.build_opener(
     urllib.request.HTTPErrorProcessor,
     _SafeRedirectHandler,
 )
+
+
+def _read_capped(response):
+    """Read at most MAX_RESPONSE_BYTES; raise instead of silently truncating."""
+    raw = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ValueError(f"response exceeds {MAX_RESPONSE_BYTES} byte limit")
+    return raw
 
 
 def text(node, *names):
@@ -58,7 +97,7 @@ def parse_feed(name, url):
     require_safe_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
     with _OPENER.open(request, timeout=15) as response:
-        root = ET.fromstring(response.read(MAX_RESPONSE_BYTES))
+        root = ET.fromstring(_read_capped(response))
     channel = root.find("channel")
     entries = list(channel) if channel is not None else list(root)
     items = []
@@ -136,7 +175,7 @@ def fetch_article(url):
     require_safe_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
     with _OPENER.open(request, timeout=20) as response:
-        raw = response.read(MAX_RESPONSE_BYTES)
+        raw = _read_capped(response)
         charset = response.headers.get_content_charset() or "utf-8"
     parser = ArticleParser()
     parser.feed(raw.decode(charset, errors="replace"))
