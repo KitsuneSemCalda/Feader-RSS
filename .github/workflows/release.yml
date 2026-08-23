@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m json.tool manifest.json >/dev/null
           python -m unittest discover -s tests -v
-          bash -n install.sh
+          bash -n scripts/install.sh
 
       - name: Read plugin metadata
         id: metadata

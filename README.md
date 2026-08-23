@@ -7,7 +7,7 @@ A persistent RSS reader for the Omarchy shell, built as a Quickshell plugin.
 To install a local copy during development:
 
 ```bash
-./install.sh
+./scripts/install.sh
 ```
 
 The installer validates the manifest, removes the previous plugin files, and
@@ -21,8 +21,8 @@ the shell does not detect the copy immediately, run
 
 Backups are stored separately in
 `~/.local/state/omarchy/rss-reader/backups/`. To create one manually, run
-`./backup.sh`.
-To restore a backup, run `./restore.sh /path/to/backup`; the current data is
+`./scripts/backup.sh`.
+To restore a backup, run `./scripts/restore.sh /path/to/backup`; the current data is
 backed up first.
 
 ## Distribution through the Omarchy plugin system
@@ -37,6 +37,13 @@ omarchy plugin add https://github.com/KitsuneSemCalda/Feader-RSS.git --enable
 
 Omarchy validates the manifest before copying the plugin to
 `~/.config/omarchy/plugins/`. The shell does not execute an install hook.
+
+The runtime requires Omarchy's Quattro shell, `python3`, and network access to
+the configured RSS/Atom feeds. It runs with the user's permissions inside the
+long-running shell process. The helper invokes `python3`, creates the state
+directory with `mkdir`, opens article URLs in the browser, and may call
+`omarchy-notification-send` for new posts. No elevated privileges, background
+service, or remote build is required.
 
 ## Feeds and persistence
 

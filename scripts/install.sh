@@ -4,7 +4,7 @@ set -euo pipefail
 # Local-development installer for Feader RSS.
 # Public distribution should use: omarchy plugin add <git-url> --enable
 
-plugin_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+plugin_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_id="io.github.kitsunesemcalda.feader-rss"
 destination="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy/plugins/${plugin_id}"
 
@@ -16,7 +16,7 @@ fi
 printf '%s\n' "Validando o plugin..."
 omarchy plugin validate "${plugin_root}"
 
-bash "${plugin_root}/backup.sh"
+bash "${plugin_root}/scripts/backup.sh"
 
 if [[ -e "${destination}" && ! -d "${destination}" ]]; then
   printf '%s\n' "Erro: o destino existe e não é um diretório: ${destination}" >&2
@@ -35,6 +35,7 @@ mkdir -p "${destination}"
 for file in manifest.json BarWidget.qml Panel.qml rss-fetch.py README.md example-config.json; do
   rm -f "${destination}/${file}"
 done
+rm -rf "${destination}/src" "${destination}/scripts"
 
 # Keep the installed checkout limited to the plugin contract and its runtime
 # helper. This avoids copying repository metadata or development artifacts.

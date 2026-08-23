@@ -47,6 +47,7 @@ Panel {
   property string selectedFeed: ""
   property bool preferencesReady: false
   property int refreshMinutesDraft: 5
+  property string pendingConfirm: ""
   readonly property int unreadCount: articles.filter(function(article) { return !article.read }).length
   readonly property int unreadFeedCount: {
     var feeds = {}
@@ -64,6 +65,13 @@ Panel {
     try { return JSON.parse(raw) } catch (error) { return fallback }
   }
 
+  function inferFeedName(url) {
+    var match = /^https?:\/\/([^\/?#]+)/i.exec(String(url || "").trim())
+    if (!match) return ""
+    var host = match[1].split("@").pop().split(":")[0].toLowerCase()
+    return host.replace(/^www\./, "")
+  }
+
   function loadConfig(raw) {
     var value = loadJson(raw, null)
     if (value && Array.isArray(value.feeds)) {
@@ -72,13 +80,15 @@ Panel {
       feedModel.clear()
       for (var i = 0; i < value.feeds.length; i++) {
         var feed = value.feeds[i]
-        if (feed && feed.url) feedModel.append({ name: String(feed.name || feed.url), url: String(feed.url) })
+        if (feed && feed.url) feedModel.append({
+          name: String(feed.name || root.inferFeedName(feed.url)), url: String(feed.url)
+        })
       }
     }
   }
 
   function openSettings() {
-    ensureFeedModel()
+    resetFeedModel()
     settingsOpen = true
     detailOpen = false
     selectedArticle = null
@@ -86,11 +96,25 @@ Panel {
     refreshMinutesDraft = Math.max(1, Math.min(5, Number(config.refreshMinutes || 5)))
   }
 
+  function closeSettings() {
+    settingsOpen = false
+    formControlFocused = false
+    resetFeedModel()
+  }
+
   function ensureFeedModel() {
     if (feedModel.count > 0 || !config || !Array.isArray(config.feeds)) return
+    resetFeedModel()
+  }
+
+  function resetFeedModel() {
+    feedModel.clear()
+    if (!config || !Array.isArray(config.feeds)) return
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
-      if (feed && feed.url) feedModel.append({ name: String(feed.name || feed.url), url: String(feed.url) })
+      if (feed && feed.url) feedModel.append({
+        name: String(feed.name || root.inferFeedName(feed.url)), url: String(feed.url)
+      })
     }
   }
 
@@ -123,7 +147,7 @@ Panel {
         return
       }
       seenUrls[normalizedUrl] = true
-      var name = String(feed.name || url).trim() || url
+      var name = String(feed.name || "").trim() || root.inferFeedName(url) || url
       if (seenNames[name.toLowerCase()]) {
         status = "Each feed name must be unique."
         return
@@ -218,7 +242,12 @@ Panel {
   }
 
   function openFromHotkey() { openedFromHotkey = true; open() }
-  function close() { detailOpen = false; settingsOpen = false; setCenterHoverRevealSuppressed(false); root.controller.hide() }
+  function close() {
+    detailOpen = false
+    if (settingsOpen) { settingsOpen = false; resetFeedModel() }
+    setCenterHoverRevealSuppressed(false)
+    root.controller.hide()
+  }
   function closeForPopoutSwitch() { close() }
   function toggle() { if (root.opened) close(); else open() }
 
@@ -293,10 +322,25 @@ Panel {
   }
 
   function markRead(article) {
-    if (!article || article.read) return
+    if (!article || article.read) return article
     var next = articles.slice()
-    var index = next.indexOf(article)
-    if (index >= 0) { next[index] = Object.assign({}, article, { read: true }); articles = next; saveState() }
+    var articleId = String(article.id || "")
+    var articleUrl = String(article.url || "")
+    var index = -1
+    for (var i = 0; i < next.length; i++) {
+      var candidate = next[i]
+      if ((articleId !== "" && String(candidate.id || "") === articleId)
+          || (articleId === "" && articleUrl !== "" && String(candidate.url || "") === articleUrl)) {
+        index = i
+        break
+      }
+    }
+    if (index < 0) return article
+    var updated = Object.assign({}, next[index], { read: true })
+    next[index] = updated
+    articles = next
+    saveState()
+    return updated
   }
 
   function markAllRead() {
@@ -311,10 +355,20 @@ Panel {
     saveState()
   }
 
+  function requestConfirm(action) { pendingConfirm = action }
+
+  function cancelConfirm() { pendingConfirm = "" }
+
+  function confirmPending() {
+    if (pendingConfirm === "markAllRead") markAllRead()
+    else if (pendingConfirm === "markAllUnread") markAllUnread()
+    pendingConfirm = ""
+  }
+
   function openArticle(article) {
     if (!article) return
-    markRead(article)
-    Qt.openUrlExternally(String(article.url))
+    var openedArticle = markRead(article)
+    Qt.openUrlExternally(String(openedArticle.url))
   }
 
   function loadArticle(article) {
@@ -328,10 +382,10 @@ Panel {
 
   function showArticle(article) {
     if (!article) return
-    selectedArticle = article
+    var openedArticle = markRead(article)
+    selectedArticle = openedArticle
     detailOpen = true
-    markRead(article)
-    loadArticle(article)
+    loadArticle(openedArticle)
   }
 
   function mergeArticle(raw) {
@@ -454,13 +508,17 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    contentHeight: panel.fittedContentHeight(column.y + column.implicitHeight + Style.space(16))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.formControlFocused
-      onCloseRequested: root.close()
+      z: 0
+      blocked: root.formControlFocused || root.pendingConfirm !== ""
+      onCloseRequested: {
+        if (root.pendingConfirm !== "") root.cancelConfirm()
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) {
         if (root.settingsOpen) return
@@ -481,8 +539,9 @@ Panel {
     Flickable {
       id: scrollArea
       anchors.fill: parent
+      z: 1
       contentWidth: width
-      contentHeight: column.implicitHeight
+      contentHeight: column.y + column.implicitHeight + Style.space(16)
       clip: true
       boundsBehavior: Flickable.StopAtBounds
       interactive: contentHeight > height
@@ -495,24 +554,25 @@ Panel {
       width: Math.max(0, scrollArea.width - Style.space(32))
       spacing: Style.space(10)
 
-      Row {
+      Flow {
         width: parent.width
         spacing: Style.space(10)
         Text {
-          width: Math.max(0, parent.width - statusLabel.implicitWidth - parent.spacing)
+          width: Math.max(0, parent.width - Math.min(statusLabel.implicitWidth, parent.width) - parent.spacing)
           text: root.settingsOpen ? "FEEDS" : (root.detailOpen ? "ARTICLE" : "FEADER RSS")
           color: root.foreground; font.family: root.fontFamily
           font.pixelSize: Style.font.heading; font.bold: true
         }
         Text {
           id: statusLabel
+          width: Math.min(implicitWidth, parent.width)
           text: root.loading ? "Refreshing…" : root.status
           color: root.dim; font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
         }
       }
 
-      Row {
+      Flow {
         visible: !root.detailOpen && !root.settingsOpen
         spacing: Style.space(8)
         width: parent.width
@@ -532,7 +592,6 @@ Panel {
           onActiveFocusChanged: root.formControlFocused = activeFocus
           onClicked: root.openSettings()
         }
-        Item { width: Math.max(0, parent.width - refreshButton.width - configureButton.width - closeButton.width - parent.spacing * 2); height: 1 }
         Button {
           id: closeButton
           text: "Close"
@@ -543,22 +602,47 @@ Panel {
         }
       }
 
-      Row {
+      Flow {
         visible: !root.detailOpen && !root.settingsOpen
         spacing: Style.space(8)
+        width: parent.width
         Button {
           text: "Mark all read"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
-          onClicked: root.markAllRead()
+          onClicked: root.requestConfirm("markAllRead")
         }
         Button {
           text: "Mark all unread"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
-          onClicked: root.markAllUnread()
+          onClicked: root.requestConfirm("markAllUnread")
+        }
+      }
+
+      Text {
+        visible: !root.detailOpen && !root.settingsOpen
+        text: "Shortcuts: R refresh · S settings · ↑↓ navigate · Enter open"
+        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap; width: parent.width
+      }
+
+      Column {
+        visible: !root.detailOpen && !root.settingsOpen && root.feedErrors.length > 0
+        width: parent.width
+        spacing: Style.space(2)
+        Repeater {
+          model: root.feedErrors
+          delegate: Text {
+            required property var modelData
+            width: parent.width
+            text: "⚠ " + String(modelData.name || modelData.feed || modelData.url || "Feed")
+              + ": " + String(modelData.error || modelData.message || "failed to refresh")
+            color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
         }
       }
 
@@ -575,18 +659,20 @@ Panel {
       }
 
       TextField {
+        id: searchField
         visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
         width: parent.width
-        text: root.searchQuery
         foreground: root.foreground
         placeholderText: "Search articles"
-        onTextChanged: if (activeFocus) root.setSearchQuery(text)
+        onTextChanged: root.setSearchQuery(text)
         onActiveFocusChanged: root.formControlFocused = activeFocus
+        Component.onCompleted: text = root.searchQuery
       }
 
-      Row {
+      Flow {
         visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
         spacing: Style.space(6)
+        width: parent.width
         Button {
           text: "All"
           selected: root.readFilter === "all"
@@ -613,30 +699,21 @@ Panel {
         }
       }
 
-      Flow {
+      Dropdown {
+        id: feedFilterDropdown
         visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
         width: parent.width
-        spacing: Style.space(6)
-        Button {
-          text: "All feeds"
-          selected: root.selectedFeed === ""
-          foreground: root.foreground
-          focusable: true
-          onActiveFocusChanged: root.formControlFocused = activeFocus
-          onClicked: root.setSelectedFeed("")
-        }
-        Repeater {
-          model: root.config.feeds
-          delegate: Button {
-            required property var modelData
-            text: String(modelData.name || modelData.url)
-            selected: root.selectedFeed === String(modelData.name || modelData.url)
-            foreground: root.foreground
-            focusable: true
-            onActiveFocusChanged: root.formControlFocused = activeFocus
-            onClicked: root.setSelectedFeed(String(modelData.name || modelData.url))
-          }
-        }
+        showLabel: false
+        foreground: root.foreground
+        value: root.selectedFeed
+        options: [{ value: "", label: "All feeds" }].concat(
+          root.config.feeds.map(function(feed) {
+            var v = String(feed.name || feed.url)
+            return { value: v, label: v }
+          }))
+        onHovered: function(isHovered) {}
+        onChanged: function(value) { root.setSelectedFeed(value) }
+        onActiveFocusChanged: root.formControlFocused = activeFocus
       }
 
       Text {
@@ -646,9 +723,10 @@ Panel {
         wrapMode: Text.WordWrap; width: parent.width
       }
 
-      Row {
+      Flow {
         visible: root.detailOpen && !root.settingsOpen
         spacing: Style.space(8)
+        width: parent.width
         Button {
           text: "Back"
           foreground: root.foreground
@@ -677,11 +755,20 @@ Panel {
         width: parent.width
         spacing: Style.space(8)
         Text {
+          id: articleTitle
           width: parent.width
           text: root.selectedArticle ? root.selectedArticle.title : ""
-          color: root.foreground; font.family: root.fontFamily
+          color: Color.accent; font.family: root.fontFamily
           font.pixelSize: Style.font.heading; font.bold: true
+          font.underline: titleHover.hovered
           wrapMode: Text.WordWrap
+          MouseArea {
+            id: titleHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.openArticle(root.selectedArticle)
+          }
         }
         Text {
           width: parent.width
@@ -705,8 +792,8 @@ Panel {
         Text {
           width: parent.width
           visible: !root.articleLoading && root.articleError !== ""
-          text: root.articleError
-          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
+          text: "⚠ " + root.articleError
+          color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
         }
         Text {
@@ -741,9 +828,9 @@ Panel {
 
             Column {
               anchors.fill: parent; anchors.margins: Style.space(9); spacing: Style.space(3)
-              Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.WordWrap }
-              Text { id: meta; text: String(modelData.feed || "") + " · " + String(modelData.published || ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
-              Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.WordWrap }
+              Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
+              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap }
+              Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
             }
             MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = index; root.showArticle(modelData) } }
           }
@@ -751,23 +838,40 @@ Panel {
       }
 
       Column {
+        id: settingsColumn
         visible: root.settingsOpen
         width: parent.width
-        spacing: Style.space(12)
+        spacing: Style.space(10)
 
         Text {
           width: parent.width
-          text: "Add, remove, or edit RSS feeds. Changes are stored locally."
+          text: "Manage your RSS sources and refresh interval. Changes are stored locally."
           color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
         }
 
-        Row {
+        PanelSeparator { foreground: root.foreground }
+
+        PanelSectionHeader {
+          text: "UPDATE INTERVAL"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Text {
+          width: parent.width
+          text: "Feeds refresh automatically between 1 and 5 minutes."
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Flow {
+          width: parent.width
           spacing: Style.space(6)
           Text {
+            width: Math.min(implicitWidth, parent.width)
             text: "Refresh every"
             color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
-            anchors.verticalCenter: parent.verticalCenter
           }
           Button {
             text: "1 min"
@@ -787,52 +891,33 @@ Panel {
           }
         }
 
-        Repeater {
-          model: feedModel
-          delegate: Column {
-            required property int index
-            required property string name
-            required property string url
-            width: parent.width
-            spacing: Style.space(8)
-            Column {
-              width: parent.width
-              spacing: Style.space(6)
-              TextField {
-                id: feedName
-                focus: root.settingsOpen && index === 0
-                width: parent.width
-                text: name
-                foreground: root.foreground
-                placeholderText: "Feed name"
-                onTextChanged: if (activeFocus) feedModel.setProperty(index, "name", text)
-                onActiveFocusChanged: root.formControlFocused = activeFocus
-              }
-              TextField {
-                id: feedUrl
-                width: parent.width
-                text: url
-                foreground: root.foreground
-                placeholderText: "https://example.org/feed.xml"
-                inputMethodHints: Qt.ImhUrlCharactersOnly
-                onTextChanged: if (activeFocus) feedModel.setProperty(index, "url", text)
-                onActiveFocusChanged: root.formControlFocused = activeFocus
-              }
-            }
-            Row {
-              width: parent.width
-              Button {
-                text: "Remove"
-                foreground: root.foreground
-                focusable: true
-                onActiveFocusChanged: root.formControlFocused = activeFocus
-                onClicked: root.removeFeed(index)
-              }
-            }
+        PanelSeparator { foreground: root.foreground }
+
+        Flow {
+          width: parent.width
+          spacing: Style.space(8)
+          PanelSectionHeader {
+            text: "RSS FEEDS"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+          Text {
+            text: feedModel.count + "/8"
+            color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
           }
         }
 
-        Row {
+        Text {
+          width: parent.width
+          text: feedModel.count === 0
+            ? "No feeds configured yet. Add one to start reading."
+            : "Give each feed a name, or leave it blank to use the site name."
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Flow {
+          width: parent.width
           spacing: Style.space(8)
           Button {
             text: "Add feed"
@@ -841,8 +926,109 @@ Panel {
             onActiveFocusChanged: root.formControlFocused = activeFocus
             onClicked: root.addFeed()
           }
+        }
+
+        Column {
+          id: feedList
+          width: parent.width
+          spacing: Style.space(8)
+
+          Repeater {
+            model: feedModel
+            delegate: BorderSurface {
+              required property int index
+              required property string name
+              required property string url
+              width: feedList.width
+              height: feedCard.implicitHeight + Style.space(18)
+              color: Style.normalFillFor(root.foreground, Color.accent)
+              radius: Style.cornerRadius
+              borderSpec: Border.none()
+
+              Column {
+                id: feedCard
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(9)
+                spacing: Style.space(7)
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(8)
+                  Text {
+                    width: Math.max(0, parent.width - removeButton.implicitWidth - parent.spacing)
+                    text: "FEED " + (index + 1)
+                    color: root.dim; font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption; font.bold: true
+                  }
+                  Button {
+                    id: removeButton
+                    text: "Remove"
+                    foreground: root.foreground
+                    focusable: true
+                    onActiveFocusChanged: root.formControlFocused = activeFocus
+                    onClicked: root.removeFeed(index)
+                  }
+                }
+
+                Flow {
+                  id: feedFields
+                  readonly property real minFieldWidth: Style.space(180)
+                  readonly property bool twoColumn: feedFields.width >= (minFieldWidth * 2 + feedFields.spacing)
+                  width: parent.width
+                  spacing: Style.space(6)
+                  TextField {
+                    id: feedName
+                    width: feedFields.twoColumn
+                      ? Math.max(0, (feedFields.width - feedFields.spacing) / 2)
+                      : feedFields.width
+                    text: name
+                    foreground: root.foreground
+                    placeholderText: "Feed name (optional)"
+                    onTextChanged: if (activeFocus) feedModel.setProperty(index, "name", text)
+                    onEditingFinished: if (text.trim() === "") feedModel.setProperty(index, "name", root.inferFeedName(feedUrl.text))
+                    onActiveFocusChanged: root.formControlFocused = activeFocus
+                    Component.onCompleted: {
+                      if (root.settingsOpen && index === 0) Qt.callLater(forceActiveFocus)
+                    }
+                  }
+                  TextField {
+                    id: feedUrl
+                    width: feedFields.twoColumn
+                      ? Math.max(0, (feedFields.width - feedFields.spacing) / 2)
+                      : feedFields.width
+                    text: url
+                    foreground: root.foreground
+                    placeholderText: "https://example.org/feed.xml"
+                    inputMethodHints: Qt.ImhUrlCharactersOnly
+                    onTextChanged: if (activeFocus) feedModel.setProperty(index, "url", text)
+                    onActiveFocusChanged: root.formControlFocused = activeFocus
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        PanelSeparator { foreground: root.foreground }
+
+        PanelSectionHeader {
+          text: "ACTIONS"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Flow {
+          id: actionsFlow
+          readonly property real minButtonWidth: Style.space(140)
+          readonly property bool twoColumn: actionsFlow.width >= (minButtonWidth * 2 + spacing)
+          width: parent.width
+          spacing: Style.space(8)
           Button {
             text: "Save feeds"
+            width: actionsFlow.twoColumn ? (actionsFlow.width - actionsFlow.spacing) / 2 : actionsFlow.width
+            height: Style.space(44)
             foreground: root.foreground
             focusable: true
             onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -850,14 +1036,35 @@ Panel {
           }
           Button {
             text: "Cancel"
+            width: actionsFlow.twoColumn ? (actionsFlow.width - actionsFlow.spacing) / 2 : actionsFlow.width
+            height: Style.space(44)
             foreground: root.foreground
             focusable: true
             onActiveFocusChanged: root.formControlFocused = activeFocus
-            onClicked: { root.settingsOpen = false; root.formControlFocused = false }
+            onClicked: root.closeSettings()
           }
         }
+
       }
     }
+    }
+
+    ConfirmDialog {
+      id: confirmDialog
+      anchors.fill: parent
+      z: 2
+      opened: root.pendingConfirm !== ""
+      message: root.pendingConfirm === "markAllRead" ? "Mark all articles as read?"
+        : (root.pendingConfirm === "markAllUnread" ? "Mark all articles as unread?" : "")
+      confirmText: "Confirm"
+      cancelText: "Cancel"
+      foreground: root.foreground
+      background: Color.popups.background
+      fontFamily: root.fontFamily
+      focus: opened
+      Keys.onPressed: function(event) { if (handleKey(event)) event.accepted = true }
+      onCanceled: root.cancelConfirm()
+      onConfirmed: root.confirmPending()
     }
   }
 }

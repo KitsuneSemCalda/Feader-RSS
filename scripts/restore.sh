@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 || ! -d "$1" ]]; then
-  printf '%s\n' "Uso: ./restore.sh /caminho/para/backup" >&2
+  printf '%s\n' "Uso: ./scripts/restore.sh /caminho/para/backup" >&2
   exit 2
 fi
 
