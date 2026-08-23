@@ -368,7 +368,12 @@ Panel {
   function openArticle(article) {
     if (!article) return
     var openedArticle = markRead(article)
-    Qt.openUrlExternally(String(openedArticle.url))
+    var url = String(openedArticle.url || "")
+    if (!/^https?:\/\//i.test(url)) {
+      status = "Refused to open unsafe article link."
+      return
+    }
+    Qt.openUrlExternally(url)
   }
 
   function loadArticle(article) {
@@ -642,6 +647,7 @@ Panel {
               + ": " + String(modelData.error || modelData.message || "failed to refresh")
             color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
           }
         }
       }
@@ -762,6 +768,7 @@ Panel {
           font.pixelSize: Style.font.heading; font.bold: true
           font.underline: titleHover.hovered
           wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
           MouseArea {
             id: titleHover
             anchors.fill: parent
@@ -775,12 +782,14 @@ Panel {
           text: root.selectedArticle ? String(root.selectedArticle.feed || "") + " · " + String(root.selectedArticle.published || "") : ""
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
         }
         Text {
           width: parent.width
           text: root.selectedArticle ? root.selectedArticle.summary : ""
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
         }
         Text {
           width: parent.width
@@ -795,6 +804,7 @@ Panel {
           text: "⚠ " + root.articleError
           color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
         }
         Text {
           width: parent.width
@@ -828,9 +838,9 @@ Panel {
 
             Column {
               anchors.fill: parent; anchors.margins: Style.space(9); spacing: Style.space(3)
-              Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
-              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap }
-              Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
+              Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+              Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
             }
             MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = index; root.showArticle(modelData) } }
           }

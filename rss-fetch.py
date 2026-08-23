@@ -7,8 +7,36 @@ import json
 import re
 import sys
 import urllib.request
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
+
+ALLOWED_SCHEMES = {"http", "https"}
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+
+def require_safe_url(url):
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise ValueError(f"unsupported URL scheme: {scheme or '(none)'}")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate the scheme of every redirect target, not just the initial URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        require_safe_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(
+    urllib.request.UnknownHandler,
+    urllib.request.HTTPHandler,
+    urllib.request.HTTPSHandler,
+    urllib.request.HTTPDefaultErrorHandler,
+    urllib.request.HTTPErrorProcessor,
+    _SafeRedirectHandler,
+)
 
 
 def text(node, *names):
@@ -27,9 +55,10 @@ def clean(value):
 
 
 def parse_feed(name, url):
+    require_safe_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        root = ET.fromstring(response.read())
+    with _OPENER.open(request, timeout=15) as response:
+        root = ET.fromstring(response.read(MAX_RESPONSE_BYTES))
     channel = root.find("channel")
     entries = list(channel) if channel is not None else list(root)
     items = []
@@ -104,9 +133,10 @@ class ArticleParser(HTMLParser):
 
 
 def fetch_article(url):
+    require_safe_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "io.github.kitsunesemcalda.feader-rss/0.1"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        raw = response.read()
+    with _OPENER.open(request, timeout=20) as response:
+        raw = response.read(MAX_RESPONSE_BYTES)
         charset = response.headers.get_content_charset() or "utf-8"
     parser = ArticleParser()
     parser.feed(raw.decode(charset, errors="replace"))
