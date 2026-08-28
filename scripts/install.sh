@@ -57,6 +57,13 @@ build_local() {
 
 fetch_binary() {
   local platform asset_name url checksums_url tmp_dir asset_path checksums_path expected actual
+
+  if ! command -v gh >/dev/null 2>&1; then
+    printf '%s\n' "Error: 'gh' (GitHub CLI) command not found." >&2
+    printf '%s\n' "It is required to verify release binary provenance before install. See https://cli.github.com" >&2
+    exit 1
+  fi
+
   platform="$(detect_platform)"
   asset_name="${binary_name}_${version}_${platform}"
   url="https://github.com/${repo}/releases/download/v${version}/${asset_name}"
@@ -74,21 +81,30 @@ fetch_binary() {
     exit 1
   fi
 
-  if curl -fsSL --proto '=https' --tlsv1.2 -o "${checksums_path}" "${checksums_url}"; then
-    expected="$(grep -F " ${asset_name}" "${checksums_path}" | awk '{print $1}' | head -n1)"
-    if [[ -z "${expected}" ]]; then
-      printf '%s\n' "Error: no checksum entry for ${asset_name} in checksums.txt" >&2
-      exit 1
-    fi
-    actual="$(sha256sum "${asset_path}" | awk '{print $1}')"
-    if [[ "${expected}" != "${actual}" ]]; then
-      printf '%s\n' "Error: checksum mismatch for ${asset_name} (expected ${expected}, got ${actual})" >&2
-      exit 1
-    fi
-    printf '%s\n' "Checksum verified."
-  else
-    printf '%s\n' "Warning: could not download checksums.txt; skipping verification." >&2
+  if ! curl -fsSL --proto '=https' --tlsv1.2 -o "${checksums_path}" "${checksums_url}"; then
+    printf '%s\n' "Error: failed to download checksums.txt: ${checksums_url}" >&2
+    printf '%s\n' "Refusing to install an unverified binary." >&2
+    exit 1
   fi
+  expected="$(grep -F " ${asset_name}" "${checksums_path}" | awk '{print $1}' | head -n1)"
+  if [[ -z "${expected}" ]]; then
+    printf '%s\n' "Error: no checksum entry for ${asset_name} in checksums.txt" >&2
+    exit 1
+  fi
+  actual="$(sha256sum "${asset_path}" | awk '{print $1}')"
+  if [[ "${expected}" != "${actual}" ]]; then
+    printf '%s\n' "Error: checksum mismatch for ${asset_name} (expected ${expected}, got ${actual})" >&2
+    exit 1
+  fi
+  printf '%s\n' "Checksum verified."
+
+  printf '%s\n' "Verifying build provenance attestation..."
+  if ! gh attestation verify "${asset_path}" --repo "${repo}" >/dev/null; then
+    printf '%s\n' "Error: build provenance attestation verification failed for ${asset_name}." >&2
+    printf '%s\n' "Refusing to install a binary that cannot be verified as built by ${repo}'s release workflow from a signed commit." >&2
+    exit 1
+  fi
+  printf '%s\n' "Provenance verified: binary was built by ${repo}'s release workflow."
 
   chmod +x "${asset_path}"
   install -m 0755 "${asset_path}" "${destination}/${binary_name}"
