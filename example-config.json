@@ -1,5 +1,7 @@
 {
   "maxItems": 200,
   "refreshMinutes": 5,
+  "scrollStep": 54,
+  "panelGap": 8,
   "feeds": []
 }

@@ -1,0 +1,147 @@
+// Package article extracts readable text from an HTML page, equivalent to
+// the stdlib-only ArticleParser in the original Python implementation.
+package article
+
+import (
+	"fmt"
+	"io"
+	"regexp"
+	"strings"
+	"time"
+
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
+
+	"github.com/KitsuneSemCalda/feader-rss/internal/safefetch"
+)
+
+const MaxResponseBytes = 5 * 1024 * 1024
+
+// Article is the readable-text result of fetching a page.
+type Article struct {
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+var blockTags = map[string]bool{
+	"article": true, "br": true, "div": true, "h1": true, "h2": true,
+	"h3": true, "h4": true, "li": true, "p": true, "pre": true, "section": true,
+}
+
+var skipTags = map[string]bool{
+	"aside": true, "footer": true, "form": true, "header": true,
+	"nav": true, "script": true, "style": true, "svg": true,
+}
+
+var (
+	tabsRE       = regexp.MustCompile(`[ \t]+`)
+	newlineTabRE = regexp.MustCompile(`\n[ \t]+`)
+	punctRE      = regexp.MustCompile(`\s+([,.;:!?])`)
+	blankLinesRE = regexp.MustCompile(`\n{3,}`)
+)
+
+// Extract walks the parsed HTML tree and produces (title, readable content),
+// mirroring the block/skip-tag behavior of the Python ArticleParser.
+func Extract(r io.Reader) (title, content string, err error) {
+	doc, err := html.Parse(r)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid HTML: %w", err)
+	}
+
+	var parts []string
+	var titleParts []string
+	skipDepth := 0
+	inTitle := false
+
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			tag := strings.ToLower(n.Data)
+			if skipTags[tag] {
+				skipDepth++
+				defer func() { skipDepth-- }()
+			}
+			wasTitle := tag == "title"
+			if wasTitle {
+				inTitle = true
+			}
+			if skipDepth == 0 && blockTags[tag] {
+				parts = append(parts, "\n")
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				walk(c)
+			}
+			if skipDepth == 0 && blockTags[tag] {
+				parts = append(parts, "\n")
+			}
+			if wasTitle {
+				inTitle = false
+			}
+			return
+		}
+		if n.Type == html.TextNode {
+			if skipDepth > 0 {
+				return
+			}
+			value := strings.Join(strings.Fields(n.Data), " ")
+			if value == "" {
+				return
+			}
+			parts = append(parts, value+" ")
+			if inTitle {
+				titleParts = append(titleParts, value)
+			}
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+
+	joined := tabsRE.ReplaceAllString(strings.Join(parts, ""), " ")
+	joined = newlineTabRE.ReplaceAllString(joined, "\n")
+	joined = punctRE.ReplaceAllString(joined, "$1")
+	joined = blankLinesRE.ReplaceAllString(joined, "\n\n")
+	joined = strings.TrimSpace(joined)
+
+	title = strings.TrimSpace(strings.Join(titleParts, " "))
+	if title == "" {
+		for _, line := range strings.Split(joined, "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				title = trimmed
+				break
+			}
+		}
+		if title == "" {
+			title = "Article"
+		}
+	}
+	return title, joined, nil
+}
+
+// Fetch downloads url and extracts its readable title/content.
+func Fetch(url string) (*Article, error) {
+	resp, err := safefetch.Get(url, 20*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := safefetch.ReadCapped(resp.Body, MaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	reader, err := charset.NewReader(strings.NewReader(string(data)), resp.Header.Get("Content-Type"))
+	if err != nil {
+		reader = strings.NewReader(string(data))
+	}
+
+	title, content, err := Extract(reader)
+	if err != nil {
+		return nil, err
+	}
+	return &Article{URL: url, Title: title, Content: content}, nil
+}

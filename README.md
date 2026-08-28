@@ -3,12 +3,14 @@
 A persistent RSS reader for the Omarchy shell, built as a Quickshell plugin.
 
 <p align="center">
-  <img src="screenshots/bar-widget.png" alt="Feader RSS bar widget showing the unread count" height="48">
+  <img src="screenshots/0.3.0/HasNewFeeds.png" alt="Feader RSS bar icon with unread articles" height="48">
+  <img src="screenshots/0.3.0/AllFeedsReaded.png" alt="Feader RSS bar icon with all articles read" height="48">
 </p>
 
 <p align="center">
-  <img src="screenshots/panel-articles.png" alt="Feader RSS article list panel" width="45%">
-  <img src="screenshots/panel-settings.png" alt="Feader RSS feed configuration panel" width="45%">
+  <img src="screenshots/0.3.0/FeaderMainPage.png" alt="Feader RSS article list panel" width="30%">
+  <img src="screenshots/0.3.0/FeaderArticle.png" alt="Feader RSS article detail view" width="30%">
+  <img src="screenshots/0.3.0/FeaderSettings.png" alt="Feader RSS feed configuration panel" width="30%">
 </p>
 
 ## Local installation

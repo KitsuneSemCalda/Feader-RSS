@@ -24,15 +24,22 @@ Panel {
   readonly property string configPath: home + "/.config/omarchy/rss-reader.json"
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state")
     + "/omarchy/rss-reader"
-  readonly property string statePath: stateDir + "/items.json"
-  readonly property string fetchScript: Qt.resolvedUrl("rss-fetch.py").toString().replace(/^file:\/\//, "")
+  readonly property string statePath: stateDir + "/preferences.json"
+  readonly property string dbPath: stateDir + "/items.db"
+  readonly property string fetchBinary: Qt.resolvedUrl("feader-rss-fetch").toString().replace(/^file:\/\//, "")
 
-  property var config: ({ feeds: [], maxItems: 200, refreshMinutes: 5 })
+  property var config: ({
+    feeds: [], maxItems: 200, refreshMinutes: 5,
+    scrollStep: 54, panelGap: Style.gapsOut
+  })
   property var articles: []
   property bool loading: false
   property string status: ""
   property var feedErrors: []
   property string lastUpdated: ""
+  property string prefetchNote: ""
+  property int unreadNotificationId: 0
+  property int lastNotifiedUnreadCount: -1
   property int selectedIndex: 0
   property var selectedArticle: null
   property bool detailOpen: false
@@ -47,6 +54,7 @@ Panel {
   property string selectedFeed: ""
   property bool preferencesReady: false
   property int refreshMinutesDraft: 5
+  property real scrollStepDraft: 54
   property string pendingConfirm: ""
   readonly property int unreadCount: articles.filter(function(article) { return !article.read }).length
   readonly property int unreadFeedCount: {
@@ -56,9 +64,22 @@ Panel {
     }
     return Object.keys(feeds).filter(function(feed) { return feed !== "" }).length
   }
-  readonly property string label: unreadCount ? " " + unreadCount : ""
+  // A single glyph, always — BarIconButton renders `text` as one un-clipped
+  // optical glyph sized for its fixed icon slot. Appending the live unread
+  // count here (e.g. " 15") used to bleed digits past that slot and
+  // over whichever bar widget sits next to this one. The count still shows
+  // in the tooltip (unreadSummary) and inside the panel itself.
+  readonly property string label: ""
   readonly property string unreadSummary: unreadFeedCount + " feeds unread · " + unreadCount + " articles"
   readonly property int refreshSeconds: Math.max(60, Math.min(300, Number(config.refreshMinutes || 5) * 60))
+  readonly property real resolvedScrollStep: {
+    var value = Number(config.scrollStep)
+    return (isFinite(value) && value > 0) ? value : 54
+  }
+  readonly property real resolvedPanelGap: {
+    var value = Number(config.panelGap)
+    return (isFinite(value) && value >= 0) ? value : Style.gapsOut
+  }
   readonly property var visibleArticles: articles.filter(function(article) { return articleMatches(article) })
 
   function loadJson(raw, fallback) {
@@ -94,6 +115,7 @@ Panel {
     selectedArticle = null
     formControlFocused = false
     refreshMinutesDraft = Math.max(1, Math.min(5, Number(config.refreshMinutes || 5)))
+    scrollStepDraft = root.resolvedScrollStep
   }
 
   function closeSettings() {
@@ -155,11 +177,12 @@ Panel {
       seenNames[name.toLowerCase()] = true
       feeds.push({ name: name, url: url })
     }
-    root.config = {
+    root.config = Object.assign({}, root.config, {
       feeds: feeds,
       maxItems: Number(root.config.maxItems || 200),
-      refreshMinutes: refreshMinutesDraft
-    }
+      refreshMinutes: refreshMinutesDraft,
+      scrollStep: scrollStepDraft
+    })
     configFile.setText(JSON.stringify(root.config, null, 2) + "\n")
     settingsOpen = false
     status = "Feeds saved"
@@ -180,25 +203,14 @@ Panel {
       root.articles = []
       return
     }
-    if (value && Array.isArray(value.items)) {
-      var configuredFeeds = {}
-      for (var i = 0; i < config.feeds.length; i++) {
-        var feed = config.feeds[i]
-        if (feed && feed.name) configuredFeeds[String(feed.name)] = true
-      }
-      if (selectedFeed !== "" && !configuredFeeds[selectedFeed]) selectedFeed = ""
-      root.articles = value.items.filter(function(article) {
-        return article && configuredFeeds[String(article.feed || "")] === true
-      })
-    }
+    root.loadInitialArticles()
   }
 
   function saveState() {
     stateFile.setText(JSON.stringify({
-      version: 1,
+      version: 2,
       updatedAt: new Date().toISOString(),
-      preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedIndex: selectedIndex },
-      items: articles
+      preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedIndex: selectedIndex }
     }, null, 2) + "\n")
   }
 
@@ -235,6 +247,10 @@ Panel {
     refreshMinutesDraft = Math.max(1, Math.min(5, Number(value)))
   }
 
+  function setScrollStep(value) {
+    scrollStepDraft = Math.max(10, Math.min(200, Number(value)))
+  }
+
   function open() {
     root.refresh()
     root.controller.show()
@@ -266,7 +282,7 @@ Panel {
     if (fetchProcess.running || !config.feeds.length) return
     loading = true
     status = "Refreshing…"
-    var command = ["python3", fetchScript, "--limit", "200"]
+    var command = [fetchBinary, "fetch", "--db", dbPath, "--limit", String(config.maxItems || 200)]
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
       if (feed && feed.url) command.push(String(feed.name || feed.url), String(feed.url))
@@ -275,34 +291,71 @@ Panel {
     fetchProcess.running = true
   }
 
+  function loadInitialArticles() {
+    listProcess.command = [fetchBinary, "list", "--db", dbPath, "--limit", String(config.maxItems || 200)]
+    listProcess.running = true
+  }
+
+  function configuredFeedNames() {
+    var names = {}
+    if (config && Array.isArray(config.feeds)) {
+      for (var i = 0; i < config.feeds.length; i++) {
+        var feed = config.feeds[i]
+        if (feed && feed.name) names[String(feed.name)] = true
+      }
+    }
+    return names
+  }
+
+  function filterToConfiguredFeeds(items) {
+    var names = configuredFeedNames()
+    return items.filter(function(article) {
+      return article && names[String(article.feed || "")] === true
+    })
+  }
+
   function mergeFetched(raw) {
     var result = loadJson(raw, null)
     if (!result || !Array.isArray(result.items)) {
       loading = false; status = "Could not refresh feeds"; return
     }
     feedErrors = Array.isArray(result.errors) ? result.errors : []
-    var byId = {}
-    for (var i = 0; i < articles.length; i++) byId[String(articles[i].id)] = articles[i]
-    var newItems = []
-    for (var j = 0; j < result.items.length; j++) {
-      var incoming = result.items[j]
-      var old = byId[String(incoming.id)] || {}
-      if (!byId[String(incoming.id)]) newItems.push(incoming)
-      byId[String(incoming.id)] = Object.assign({}, old, incoming, {
-        read: old.read === true ? true : Boolean(incoming.read)
-      })
-    }
-    var merged = Object.keys(byId).map(function(key) { return byId[key] })
-    merged.sort(function(a, b) { return String(b.published).localeCompare(String(a.published)) })
-    root.articles = merged.slice(0, Number(config.maxItems || 200))
+    root.articles = filterToConfiguredFeeds(result.items)
     selectedIndex = Math.min(selectedIndex, Math.max(0, visibleArticles.length - 1))
-    saveState()
-    root.notifyNewPosts(newItems)
+    root.notifyNewPosts(Array.isArray(result.newItems) ? result.newItems : [])
     loading = false
     lastUpdated = new Date().toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
     status = feedErrors.length
       ? feedErrors.length + " feed(s) failed · " + lastUpdated
       : lastUpdated
+    root.prefetchArticles()
+    root.updateUnreadNotification()
+  }
+
+  function prefetchArticles() {
+    // Warm the article cache in the background right after a refresh, so
+    // opening an unread article is usually instant instead of waiting on a
+    // live fetch. Runs as its own process and never blocks the UI; loadArticle
+    // still fetches live if an article wasn't prefetched in time.
+    if (prefetchProcess.running) return
+    prefetchProcess.command = [fetchBinary, "prefetch", "--db", dbPath, "--limit", "20", "--concurrency", "3"]
+    prefetchProcess.running = true
+  }
+
+  function reportPrefetched(raw) {
+    var result = loadJson(raw, null)
+    if (!result || !(result.prefetched > 0)) return
+    root.prefetchNote = result.prefetched === 1
+      ? "1 article ready to read offline"
+      : result.prefetched + " articles ready to read offline"
+  }
+
+  function applyInitialArticles(raw) {
+    var result = loadJson(raw, null)
+    var items = (result && Array.isArray(result.items)) ? result.items : []
+    root.articles = filterToConfiguredFeeds(items)
+    root.prefetchArticles()
+    root.updateUnreadNotification()
   }
 
   function notifyNewPosts(items) {
@@ -319,6 +372,53 @@ Panel {
       headline,
       description
     ])
+  }
+
+  function updateUnreadNotification() {
+    console.warn("DEBUG updateUnreadNotification", omarchyPath, stateReady, unreadCount, lastNotifiedUnreadCount)
+    // Conveys the unread count through Omarchy's own notification system
+    // instead of the bar icon: BarIconButton renders its glyph unclipped,
+    // so appending a live count there bled past the icon slot and over the
+    // neighboring bar widget (see BarWidget.qml). This notification is
+    // replaced in place (via --replace-id) rather than stacking a new toast
+    // every refresh, and never auto-expires (-t 0) so it behaves like a
+    // persistent counter until the user dismisses or reads everything.
+    if (!omarchyPath || !stateReady) return
+    if (unreadCount === lastNotifiedUnreadCount) return
+    lastNotifiedUnreadCount = unreadCount
+
+    if (unreadCount === 0) {
+      unreadNotifyProcess.command = [
+        omarchyPath + "/bin/omarchy-notification-send",
+        "--app-name", "Feader RSS",
+        "-g", "",
+        "-u", "low",
+        "-t", "4000",
+        "-r", String(unreadNotificationId),
+        "Feader RSS",
+        "All caught up"
+      ]
+    } else {
+      var headline = unreadCount === 1 ? "1 unread article" : unreadCount + " unread articles"
+      var description = unreadFeedCount === 1 ? "1 feed" : unreadFeedCount + " feeds"
+      var command = [
+        omarchyPath + "/bin/omarchy-notification-send",
+        "--app-name", "Feader RSS",
+        "-g", "",
+        "-u", "low",
+        "-t", "0",
+        "-p"
+      ]
+      if (unreadNotificationId > 0) command.push("-r", String(unreadNotificationId))
+      command.push(headline, description)
+      unreadNotifyProcess.command = command
+    }
+    if (!unreadNotifyProcess.running) unreadNotifyProcess.running = true
+  }
+
+  function applyUnreadNotificationId(raw) {
+    var id = parseInt(String(raw).trim(), 10)
+    if (isFinite(id) && id > 0) root.unreadNotificationId = id
   }
 
   function markRead(article) {
@@ -339,20 +439,27 @@ Panel {
     var updated = Object.assign({}, next[index], { read: true })
     next[index] = updated
     articles = next
-    saveState()
+    persistMarkRead(updated.id)
+    root.updateUnreadNotification()
     return updated
+  }
+
+  function persistMarkRead(id) {
+    Quickshell.execDetached([fetchBinary, "mark-read", "--db", dbPath, String(id)])
   }
 
   function markAllRead() {
     var next = articles.map(function(article) { return Object.assign({}, article, { read: true }) })
     articles = next
-    saveState()
+    Quickshell.execDetached([fetchBinary, "mark-all", "--db", dbPath])
+    root.updateUnreadNotification()
   }
 
   function markAllUnread() {
     var next = articles.map(function(article) { return Object.assign({}, article, { read: false }) })
     articles = next
-    saveState()
+    Quickshell.execDetached([fetchBinary, "mark-all", "--db", dbPath, "--unread"])
+    root.updateUnreadNotification()
   }
 
   function requestConfirm(action) { pendingConfirm = action }
@@ -381,7 +488,7 @@ Panel {
     articleLoading = true
     articleError = ""
     articleContent = ""
-    articleProcess.command = ["python3", fetchScript, "--article", String(article.url)]
+    articleProcess.command = [fetchBinary, "article", "--db", dbPath, String(article.url)]
     articleProcess.running = true
   }
 
@@ -461,12 +568,18 @@ Panel {
     atomicWrites: true
     printErrors: false
     onLoaded: { root.loadState(text()); root.stateReady = true }
-    onLoadFailed: { root.articles = []; root.stateReady = true }
+    onLoadFailed: { root.preferencesReady = true; root.stateReady = true; root.loadInitialArticles() }
     onFileChanged: reload()
   }
 
   Process {
     id: fetchProcess
+    // Quickshell.Io's Process.running does not reset itself to false when
+    // the child exits; refresh() gates on it to avoid overlapping fetches,
+    // so leaving it stuck true here would silently block every future
+    // refresh (including the periodic Timer below) for the rest of the
+    // session.
+    onExited: running = false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.mergeFetched(text)
@@ -478,7 +591,47 @@ Panel {
   }
 
   Process {
+    id: listProcess
+    onExited: running = false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyInitialArticles(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
+    }
+  }
+
+  Process {
+    id: prefetchProcess
+    onExited: running = false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.reportPrefetched(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
+    }
+  }
+
+  Process {
+    id: unreadNotifyProcess
+    onExited: running = false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyUnreadNotificationId(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
+    }
+  }
+
+  Process {
     id: articleProcess
+    onExited: running = false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.mergeArticle(text)
@@ -514,6 +667,10 @@ Panel {
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(520))
     contentHeight: panel.fittedContentHeight(column.y + column.implicitHeight + Style.space(16))
+    // Distance between the bar edge and this panel. Configurable via
+    // config.panelGap (falls back to the shell's default gap) for anyone
+    // who needs extra clearance so it doesn't crowd a neighboring panel.
+    gap: root.resolvedPanelGap
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -550,7 +707,27 @@ Panel {
       clip: true
       boundsBehavior: Flickable.StopAtBounds
       interactive: contentHeight > height
+      flickDeceleration: 6000
+      maximumFlickVelocity: 2000
       Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+
+      WheelHandler {
+        // Flickable's own wheel handling moves the content by a large,
+        // device-dependent amount per notch, which reads as a jarring jump
+        // on this panel's short list. Take over wheel input entirely and
+        // step by a configurable amount instead (config.scrollStep, falls
+        // back to 54 when unset or invalid — see root.resolvedScrollStep).
+        target: null
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        onWheel: function(event) {
+          var step = Style.space(root.resolvedScrollStep)
+          var maxY = Math.max(0, scrollArea.contentHeight - scrollArea.height)
+          var deltaY = event.angleDelta.y !== 0 ? event.angleDelta.y : event.pixelDelta.y
+          if (deltaY === 0) return
+          var next = scrollArea.contentY - (deltaY / 120) * step
+          scrollArea.contentY = Math.max(0, Math.min(next, maxY))
+        }
+      }
 
     Column {
       id: column
@@ -575,6 +752,14 @@ Panel {
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
         }
+      }
+
+      Text {
+        visible: !root.detailOpen && !root.settingsOpen && root.prefetchNote !== ""
+        text: "⚡ " + root.prefetchNote
+        color: root.dim; font.family: root.fontFamily
+        font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
+        width: parent.width
       }
 
       Flow {
@@ -724,7 +909,7 @@ Panel {
 
       Text {
         visible: !root.detailOpen && !root.settingsOpen && root.visibleArticles.length === 0
-        text: root.loading ? "Fetching articles…" : (root.articles.length ? "No articles match the current filters." : "No saved articles. Configure a feed and refresh.")
+        text: root.loading ? "Fetching articles…" : (root.articles.length ? "No articles match the current filters." : "No saved articles yet. Configure a feed to start — new articles download in the background so they're ready the moment you open them.")
         color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
         wrapMode: Text.WordWrap; width: parent.width
       }
@@ -766,7 +951,7 @@ Panel {
           text: root.selectedArticle ? root.selectedArticle.title : ""
           color: Color.accent; font.family: root.fontFamily
           font.pixelSize: Style.font.heading; font.bold: true
-          font.underline: titleHover.hovered
+          font.underline: titleHover.hovered === true
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
           MouseArea {
@@ -779,7 +964,10 @@ Panel {
         }
         Text {
           width: parent.width
-          text: root.selectedArticle ? String(root.selectedArticle.feed || "") + " · " + String(root.selectedArticle.published || "") : ""
+          text: root.selectedArticle
+            ? String(root.selectedArticle.feed || "") + " · " + String(root.selectedArticle.published || "")
+              + (root.selectedArticle.cached ? " · ⚡ ready to read" : "")
+            : ""
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
           textFormat: Text.PlainText
@@ -839,7 +1027,7 @@ Panel {
             Column {
               anchors.fill: parent; anchors.margins: Style.space(9); spacing: Style.space(3)
               Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || "") + (modelData.cached ? " · ⚡ ready to read" : ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
               Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
             }
             MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = index; root.showArticle(modelData) } }
@@ -898,6 +1086,50 @@ Panel {
             focusable: true
             onActiveFocusChanged: root.formControlFocused = activeFocus
             onClicked: root.setRefreshMinutes(5)
+          }
+        }
+
+        PanelSeparator { foreground: root.foreground }
+
+        PanelSectionHeader {
+          text: "SCROLL SPEED"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Text {
+          width: parent.width
+          text: "How far the article list moves per mouse wheel notch."
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        Flow {
+          width: parent.width
+          spacing: Style.space(6)
+          Button {
+            text: "Slow"
+            selected: root.scrollStepDraft === 30
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setScrollStep(30)
+          }
+          Button {
+            text: "Normal"
+            selected: root.scrollStepDraft === 54
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setScrollStep(54)
+          }
+          Button {
+            text: "Fast"
+            selected: root.scrollStepDraft === 90
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setScrollStep(90)
           }
         }
 

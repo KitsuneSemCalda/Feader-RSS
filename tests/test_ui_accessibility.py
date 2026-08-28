@@ -65,7 +65,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("lastUpdated", PANEL)
 
     def test_panel_does_not_bundle_default_feeds(self):
-        self.assertIn("property var config: ({ feeds: [], maxItems: 200, refreshMinutes: 5 })", PANEL)
+        self.assertIn("feeds: [], maxItems: 200, refreshMinutes: 5,", PANEL)
         self.assertNotIn("lwn.net/headlines/rss", PANEL)
         self.assertNotIn("omarchy.org/feed.xml", PANEL)
         self.assertIn('feedModel.append({ name: "", url: "" })', PANEL)
@@ -79,9 +79,12 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("function saveState()", PANEL)
 
     def test_refresh_preserves_local_read_state(self):
-        self.assertIn("read: old.read === true ? true : Boolean(incoming.read)", PANEL)
-        self.assertIn("configuredFeeds[String(feed.name)] = true", PANEL)
-        self.assertIn("configuredFeeds[String(article.feed || \"\")] === true", PANEL)
+        # Read-state preservation now lives server-side in the Go backend
+        # (internal/store.Upsert never overwrites the stored `read` flag);
+        # the panel just filters whatever the backend returns down to the
+        # feeds still configured.
+        self.assertIn("names[String(feed.name)] = true", PANEL)
+        self.assertIn("names[String(article.feed || \"\")] === true", PANEL)
 
     def test_clicking_an_article_marks_the_opened_item_read(self):
         self.assertIn("var openedArticle = markRead(article)", PANEL)
@@ -106,7 +109,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("Each feed name must be unique.", PANEL)
 
     def test_article_detail_loads_full_content(self):
-        self.assertIn('articleProcess.command = ["python3", fetchScript, "--article", String(article.url)]', PANEL)
+        self.assertIn('articleProcess.command = [fetchBinary, "article", "--db", dbPath, String(article.url)]', PANEL)
         self.assertIn("root.mergeArticle(text)", PANEL)
         self.assertIn("root.articleContent", PANEL)
         self.assertIn("textFormat: Text.PlainText", PANEL)
@@ -119,10 +122,16 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn('text: root.unreadCount + " unread · " + root.unreadFeedCount + " feeds"', PANEL)
 
     def test_tray_and_refresh_interval_use_unread_feed_count(self):
-        self.assertIn('readonly property string label: unreadCount', PANEL)
-        self.assertIn('readonly property int refreshSeconds: Math.max(60, Math.min(300', PANEL)
+        # The bar icon must stay a single, constant glyph: BarIconButton
+        # renders `text` as one un-clipped optical glyph sized for its
+        # fixed icon slot, so appending a live unread count (e.g. " 15")
+        # used to bleed those digits past the slot and over the neighboring
+        # bar widget. Unread state is now conveyed via `active` instead.
+        self.assertIn('readonly property string label: ""', PANEL)
+        self.assertIn("readonly property int refreshSeconds: Math.max(60, Math.min(300", PANEL)
         self.assertIn('text: panelLoader.item ? panelLoader.item.label : ""', BAR)
-        self.assertIn('tooltipText: panelLoader.item ? panelLoader.item.unreadSummary', BAR)
+        self.assertIn("active: panelLoader.item ? panelLoader.item.unreadCount > 0 : false", BAR)
+        self.assertIn("tooltipText: panelLoader.item ? panelLoader.item.unreadSummary", BAR)
 
     def test_article_list_uses_theme_surface_tokens(self):
         self.assertIn("delegate: BorderSurface", PANEL)

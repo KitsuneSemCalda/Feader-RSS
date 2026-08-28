@@ -1,2 +1,9 @@
 __pycache__/
 *.pyc
+
+/feader-rss-fetch
+/feader-rss-fetch_*
+/dist/
+*.db
+*.db-wal
+*.db-shm

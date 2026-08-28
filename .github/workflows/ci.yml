@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  validate-plugin:
     name: Validate plugin
     runs-on: ubuntu-latest
 
@@ -33,3 +33,35 @@ jobs:
 
       - name: Check whitespace errors
         run: git diff --check
+
+  go:
+    name: Build and test Go backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt'ed:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        run: go build -o /dev/null ./cmd/feader-rss-fetch

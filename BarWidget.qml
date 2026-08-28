@@ -56,6 +56,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: panelLoader.item ? panelLoader.item.label : ""
+    active: panelLoader.item ? panelLoader.item.unreadCount > 0 : false
     tooltipText: panelLoader.item ? panelLoader.item.unreadSummary : "Feader RSS"
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) panelLoader.item.refresh()
