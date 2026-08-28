@@ -49,12 +49,13 @@ omarchy plugin add https://github.com/KitsuneSemCalda/Feader-RSS.git --enable
 Omarchy validates the manifest before copying the plugin to
 `~/.config/omarchy/plugins/`. The shell does not execute an install hook.
 
-The runtime requires Omarchy's Quattro shell, `python3`, and network access to
-the configured RSS/Atom feeds. It runs with the user's permissions inside the
-long-running shell process. The helper invokes `python3`, creates the state
-directory with `mkdir`, opens article URLs in the browser, and may call
-`omarchy-notification-send` for new posts. No elevated privileges, background
-service, or remote build is required.
+The runtime requires Omarchy's Quattro shell and network access to the
+configured RSS/Atom feeds. It runs with the user's permissions inside the
+long-running shell process. The plugin invokes the `feader-rss-fetch` Go
+binary (built locally or downloaded as a checksum-verified release asset by
+`scripts/install.sh`), creates the state directory with `mkdir`, opens article
+URLs in the browser, and may call `omarchy-notification-send` for new posts.
+No elevated privileges, background service, or remote build is required.
 
 ## Feeds and persistence
 
@@ -82,8 +83,10 @@ filter. These preferences are stored with the article state and restored when
 the reader starts. Failed feeds are reported in the status line without hiding
 articles successfully loaded from the other feeds.
 
-Articles are stored in
-`~/.local/state/omarchy/rss-reader/items.json`. Left-click opens the reader,
+Articles are stored in a SQLite database at
+`~/.local/state/omarchy/rss-reader/items.db` (a legacy `items.json` from
+earlier versions is imported automatically and left in place). Left-click
+opens the reader,
 middle-click refreshes it, and right-click opens the first unread article.
 Clicking an article marks it as read and loads the full text inside the reader;
 the detail view also offers a button to open the original page in the browser.
@@ -104,10 +107,12 @@ checks with:
 
 ```bash
 python3 -m unittest discover -s tests -v
+go test -race ./...
 omarchy plugin validate .
 qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
 ```
 
 GitHub Actions runs the Python tests, manifest validation, installer syntax
-checks, and whitespace checks on pushes and pull requests. Pushing a tag such
-as `v0.1.0` creates a GitHub Release with a plugin archive attached.
+checks, whitespace checks, and the Go backend tests/build on pushes and pull
+requests. Pushing a tag such as `v0.1.0` creates a GitHub Release with a
+plugin archive and the cross-compiled `feader-rss-fetch` binaries attached.
