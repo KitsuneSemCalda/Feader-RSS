@@ -1,8 +1,10 @@
 package feed
 
 import (
+	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const rssSample = `<?xml version="1.0"?>
@@ -13,6 +15,8 @@ const rssSample = `<?xml version="1.0"?>
       <title>Hello &amp; World</title>
       <link>https://example.com/a</link>
       <pubDate>Wed, 02 Oct 2024 15:00:00 GMT</pubDate>
+      <author>alice@example.com</author>
+      <category>News</category><category> news </category>
       <description><![CDATA[<p>Some <b>summary</b> text.</p>]]></description>
     </item>
     <item>
@@ -29,6 +33,9 @@ const atomSample = `<?xml version="1.0" encoding="utf-8"?>
     <title>Atom Entry</title>
     <link rel="alternate" href="https://example.com/b"/>
     <link rel="self" href="https://example.com/feed.atom"/>
+    <author><name>Alice</name></author>
+    <category term="Technology"/>
+    <category term="technology"/>
     <published>2024-10-02T15:00:00Z</published>
     <summary>An atom summary.</summary>
   </entry>
@@ -54,6 +61,15 @@ func TestParseRSS(t *testing.T) {
 	}
 	if item.Published != "Wed, 02 Oct 2024 15:00:00 GMT" {
 		t.Errorf("published = %q", item.Published)
+	}
+	if item.Author != "alice@example.com" {
+		t.Errorf("author = %q, want %q", item.Author, "alice@example.com")
+	}
+	if len(item.Categories) != 1 || item.Categories[0] != "News" {
+		t.Errorf("categories = %#v, want [News]", item.Categories)
+	}
+	if item.PublishedAt == 0 {
+		t.Error("expected RSS publication timestamp")
 	}
 	wantID := articleID("Sample", "https://example.com/a")
 	if item.ID != wantID {
@@ -85,6 +101,15 @@ func TestParseAtom(t *testing.T) {
 	if item.Summary != "An atom summary." {
 		t.Errorf("summary = %q", item.Summary)
 	}
+	if item.Author != "Alice" {
+		t.Errorf("author = %q, want %q", item.Author, "Alice")
+	}
+	if len(item.Categories) != 1 || item.Categories[0] != "Technology" {
+		t.Errorf("categories = %#v, want [Technology]", item.Categories)
+	}
+	if item.PublishedAt == 0 {
+		t.Error("expected Atom publication timestamp")
+	}
 }
 
 func TestParseUnsupportedFormat(t *testing.T) {
@@ -114,6 +139,82 @@ func TestSummaryTruncation(t *testing.T) {
 	}
 	if len(items[0].Summary) > MaxSummaryLength {
 		t.Errorf("summary length = %d, want <= %d", len(items[0].Summary), MaxSummaryLength)
+	}
+}
+
+func TestSummaryCleaningSkipsScriptsAndKeepsParagraphs(t *testing.T) {
+	xmlDoc := `<rss version="2.0"><channel><item>
+		<title><![CDATA[<b>Readable title</b>]]></title>
+		<link>https://example.com/clean</link>
+		<description><![CDATA[<p>First paragraph.</p><script>secret()</script><p>Second paragraph.</p>]]></description>
+	</item></channel></rss>`
+	items, err := Parse("Sample", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := items[0].Title; got != "Readable title" {
+		t.Errorf("title = %q, want cleaned title", got)
+	}
+	if strings.Contains(items[0].Summary, "secret()") {
+		t.Errorf("script content leaked into summary: %q", items[0].Summary)
+	}
+	if !strings.Contains(items[0].Summary, "First paragraph.\n\nSecond paragraph.") {
+		t.Errorf("paragraph boundary was lost: %q", items[0].Summary)
+	}
+}
+
+func TestRSSPrefersEncodedContentWhenAvailable(t *testing.T) {
+	xmlDoc := `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+		<title>Rich content</title><link>https://example.com/rich</link>
+		<description>Short description</description>
+		<content:encoded><![CDATA[<p>Fuller content with <b>formatting</b>.</p>]]></content:encoded>
+	</item></channel></rss>`
+	items, err := Parse("Sample", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := items[0].Summary; got != "Fuller content with formatting." {
+		t.Errorf("summary = %q, want content:encoded text", got)
+	}
+}
+
+func TestSummaryTruncationPreservesUTF8(t *testing.T) {
+	longDesc := "<p>" + strings.Repeat("á", MaxSummaryLength+100) + "</p>"
+	xmlDoc := `<rss version="2.0"><channel><item>
+		<title>Unicode</title><link>https://example.com/unicode</link>
+		<description>` + longDesc + `</description>
+	</item></channel></rss>`
+	items, err := Parse("Sample", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := items[0].Summary; len([]rune(got)) > MaxSummaryLength || !utf8.ValidString(got) {
+		t.Errorf("summary was not safely truncated: rune length=%d valid=%v", len([]rune(got)), utf8.ValidString(got))
+	}
+}
+
+func TestParseResolvesRelativeLinks(t *testing.T) {
+	base, err := url.Parse("https://example.com/news/feed.xml")
+	if err != nil {
+		t.Fatalf("Parse base URL: %v", err)
+	}
+	xmlDoc := `<rss version="2.0"><channel><item>
+		<title>Relative</title><link>/story/one</link>
+	</item></channel></rss>`
+	items, err := parse("Sample", []byte(xmlDoc), base)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.com/story/one" {
+		t.Fatalf("resolved URL = %#v", items)
+	}
+}
+
+func TestPublishedTimestampSupportsRSSAndAtom(t *testing.T) {
+	rss := PublishedTimestamp("Wed, 02 Oct 2024 15:00:00 GMT")
+	atom := PublishedTimestamp("2024-10-02T15:00:00Z")
+	if rss == 0 || atom == 0 || rss != atom {
+		t.Errorf("RSS timestamp=%d Atom timestamp=%d", rss, atom)
 	}
 }
 

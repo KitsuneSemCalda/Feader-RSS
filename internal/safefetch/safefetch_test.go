@@ -2,6 +2,7 @@ package safefetch
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -46,12 +47,21 @@ func TestGetRejectsUnsupportedScheme(t *testing.T) {
 }
 
 func TestGetRejectsLoopback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		// Some sandboxed CI runners disallow local sockets altogether. The
+		// check remains active on normal developer/CI hosts where a listener
+		// can be created.
+		t.Skipf("loopback sockets unavailable: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	}))
+	srv.Listener = listener
+	srv.Start()
 	defer srv.Close()
 
-	_, err := Get(srv.URL, time.Second)
+	_, err = Get(srv.URL, time.Second)
 	if err == nil {
 		t.Fatal("expected error fetching loopback address")
 	}
@@ -61,6 +71,20 @@ func TestGetRejectsMissingHost(t *testing.T) {
 	_, err := Get("http:///no-host", time.Second)
 	if err == nil {
 		t.Fatal("expected error for missing hostname")
+	}
+}
+
+func TestCheckResponseRejectsHTTPError(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	if err := checkResponse(resp); err == nil {
+		t.Fatal("expected non-2xx response to be rejected")
+	}
+}
+
+func TestCheckResponseAllowsSuccess(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Status: "200 OK"}
+	if err := checkResponse(resp); err != nil {
+		t.Fatalf("checkResponse: %v", err)
 	}
 }
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.kitsunesemcalda.feader-rss",
   "name": "Feader RSS",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "KitsuneSemCalda",
   "license": "BSD-3-Clause",
   "description": "Persistent RSS reader for the Omarchy shell.",

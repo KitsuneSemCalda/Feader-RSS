@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,6 +131,90 @@ func TestUpsertAndList(t *testing.T) {
 	}
 	if listed[0].ID != "a" {
 		t.Errorf("expected newest-first ordering, got %+v", listed)
+	}
+}
+
+func TestListOrdersRSSAndAtomDatesChronologically(t *testing.T) {
+	s := openTestStore(t)
+	items := []feed.Item{
+		{ID: "rss", Feed: "RSS", Title: "Older", URL: "https://x/rss", Published: "Wed, 02 Oct 2024 15:00:00 GMT"},
+		{ID: "atom", Feed: "Atom", Title: "Newer", URL: "https://x/atom", Published: "2024-10-03T15:00:00Z"},
+	}
+	if _, err := s.Upsert(items); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	listed, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 2 || listed[0].ID != "atom" {
+		t.Fatalf("expected Atom item first, got %+v", listed)
+	}
+}
+
+func TestRichMetadataRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	item := feed.Item{
+		ID: "rich", Feed: "Feed", Title: "Rich", URL: "https://x/rich",
+		Published: "2024-10-02T15:00:00Z", Author: "Alice",
+		Categories: []string{"News", "Tech"}, Summary: "summary",
+	}
+	if _, err := s.Upsert([]feed.Item{item}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	listed, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected one item, got %d", len(listed))
+	}
+	got := listed[0]
+	if got.Author != item.Author || got.PublishedAt == 0 || len(got.Categories) != 2 {
+		t.Fatalf("rich metadata did not round-trip: %+v", got)
+	}
+}
+
+func TestOpenMigratesExistingSQLiteSchema(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "items.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = raw.Exec(`CREATE TABLE articles (
+		id TEXT PRIMARY KEY,
+		feed TEXT NOT NULL,
+		title TEXT NOT NULL,
+		url TEXT NOT NULL,
+		published TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
+		content TEXT,
+		read INTEGER NOT NULL DEFAULT 0,
+		first_seen TEXT NOT NULL
+	)`)
+	if err != nil {
+		raw.Close()
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open migrated db: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.Upsert([]feed.Item{{
+		ID: "migrated", Feed: "F", Title: "Migrated", URL: "https://x/migrated",
+		Published: "2024-10-02T15:00:00Z", Author: "Alice", Categories: []string{"Tech"},
+	}}); err != nil {
+		t.Fatalf("Upsert after migration: %v", err)
+	}
+	listed, err := s.List(0)
+	if err != nil || len(listed) != 1 || listed[0].Author != "Alice" {
+		t.Fatalf("migrated schema unusable: items=%+v err=%v", listed, err)
 	}
 }
 

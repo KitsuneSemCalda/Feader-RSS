@@ -21,7 +21,8 @@ Panel {
 
   property string home: Quickshell.env("HOME") || ""
   property string omarchyPath: Quickshell.env("OMARCHY_PATH") || ""
-  readonly property string configPath: home + "/.config/omarchy/rss-reader.json"
+  readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || home + "/.config"
+  readonly property string configPath: configHome + "/omarchy/rss-reader.json"
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state")
     + "/omarchy/rss-reader"
   readonly property string statePath: stateDir + "/preferences.json"
@@ -71,7 +72,11 @@ Panel {
   // in the tooltip (unreadSummary) and inside the panel itself.
   readonly property string label: ""
   readonly property string unreadSummary: unreadFeedCount + " feeds unread · " + unreadCount + " articles"
-  readonly property int refreshSeconds: Math.max(60, Math.min(300, Number(config.refreshMinutes || 5) * 60))
+  readonly property int refreshSeconds: {
+    var minutes = Number(config && config.refreshMinutes)
+    return isFinite(minutes) && minutes > 0
+      ? Math.max(60, Math.min(300, minutes * 60)) : 300
+  }
   readonly property real resolvedScrollStep: {
     var value = Number(config.scrollStep)
     return (isFinite(value) && value > 0) ? value : 54
@@ -93,6 +98,42 @@ Panel {
     return host.replace(/^www\./, "")
   }
 
+  function feedDisplayName(feed) {
+    if (!feed) return ""
+    var explicit = String(feed.name || "").trim()
+    var url = String(feed.url || "").trim()
+    return explicit || root.inferFeedName(url) || url
+  }
+
+  function formatPublished(value) {
+    var raw = String(value || "").trim()
+    if (raw === "") return "Date unknown"
+    var date = new Date(raw)
+    if (isNaN(date.getTime())) return raw
+    return date.toLocaleDateString(Qt.locale(), Locale.ShortFormat)
+  }
+
+  function articleMeta(article) {
+    if (!article) return ""
+    var parts = []
+    var feedName = String(article.feed || "").trim()
+    var author = String(article.author || "").trim()
+    if (feedName !== "") parts.push(feedName)
+    if (author !== "") parts.push("by " + author)
+    if (String(article.published || "").trim() !== "") parts.push(root.formatPublished(article.published))
+    var categories = Array.isArray(article.categories) ? article.categories.slice(0, 3) : []
+    categories = categories.map(function(category) { return String(category || "").trim() })
+      .filter(function(category) { return category !== "" })
+    if (categories.length > 0) parts.push(categories.join(", "))
+    if (article.cached) parts.push("⚡ ready")
+    return parts.join(" · ")
+  }
+
+  function articleSummary(article) {
+    var summary = article ? String(article.summary || "").trim() : ""
+    return summary !== "" ? summary : "This feed did not provide a summary. Open the article to read it."
+  }
+
   function loadConfig(raw) {
     var value = loadJson(raw, null)
     if (value && Array.isArray(value.feeds)) {
@@ -102,7 +143,7 @@ Panel {
       for (var i = 0; i < value.feeds.length; i++) {
         var feed = value.feeds[i]
         if (feed && feed.url) feedModel.append({
-          name: String(feed.name || root.inferFeedName(feed.url)), url: String(feed.url)
+          name: root.feedDisplayName(feed), url: String(feed.url)
         })
       }
     }
@@ -135,7 +176,7 @@ Panel {
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
       if (feed && feed.url) feedModel.append({
-        name: String(feed.name || root.inferFeedName(feed.url)), url: String(feed.url)
+        name: root.feedDisplayName(feed), url: String(feed.url)
       })
     }
   }
@@ -222,7 +263,9 @@ Panel {
     var query = searchQuery.trim().toLowerCase()
     if (query === "") return true
     return (String(article.title || "") + " " + String(article.summary || "") + " "
-      + String(article.feed || "")).toLowerCase().indexOf(query) >= 0
+      + String(article.feed || "") + " " + String(article.author || "") + " "
+      + (Array.isArray(article.categories) ? article.categories.join(" ") : ""))
+      .toLowerCase().indexOf(query) >= 0
   }
 
   function setReadFilter(value) {
@@ -279,13 +322,13 @@ Panel {
   }
 
   function refresh() {
-    if (fetchProcess.running || !config.feeds.length) return
+    if (fetchProcess.running || !config || !Array.isArray(config.feeds) || !config.feeds.length) return
     loading = true
     status = "Refreshing…"
     var command = [fetchBinary, "fetch", "--db", dbPath, "--limit", String(config.maxItems || 200)]
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
-      if (feed && feed.url) command.push(String(feed.name || feed.url), String(feed.url))
+      if (feed && feed.url) command.push(root.feedDisplayName(feed), String(feed.url))
     }
     fetchProcess.command = command
     fetchProcess.running = true
@@ -301,7 +344,8 @@ Panel {
     if (config && Array.isArray(config.feeds)) {
       for (var i = 0; i < config.feeds.length; i++) {
         var feed = config.feeds[i]
-        if (feed && feed.name) names[String(feed.name)] = true
+        var name = root.feedDisplayName(feed)
+        if (name !== "") names[name] = true
       }
     }
     return names
@@ -375,7 +419,6 @@ Panel {
   }
 
   function updateUnreadNotification() {
-    console.warn("DEBUG updateUnreadNotification", omarchyPath, stateReady, unreadCount, lastNotifiedUnreadCount)
     // Conveys the unread count through Omarchy's own notification system
     // instead of the bar icon: BarIconButton renders its glyph unclipped,
     // so appending a live count there bled past the icon slot and over the
@@ -665,7 +708,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(520))
+    contentWidth: panel.fittedContentWidth(Style.space(620))
     contentHeight: panel.fittedContentHeight(column.y + column.implicitHeight + Style.space(16))
     // Distance between the bar edge and this panel. Configurable via
     // config.panelGap (falls back to the shell's default gap) for anyone
@@ -819,6 +862,16 @@ Panel {
         wrapMode: Text.WordWrap; width: parent.width
       }
 
+      Flow {
+        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
+        width: parent.width
+        spacing: Style.space(8)
+        Text {
+          text: root.articles.length + " saved articles"
+          color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+        }
+      }
+
       Column {
         visible: !root.detailOpen && !root.settingsOpen && root.feedErrors.length > 0
         width: parent.width
@@ -854,7 +907,7 @@ Panel {
         visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
         width: parent.width
         foreground: root.foreground
-        placeholderText: "Search articles"
+        placeholderText: "Search title, summary, author or category"
         onTextChanged: root.setSearchQuery(text)
         onActiveFocusChanged: root.formControlFocused = activeFocus
         Component.onCompleted: text = root.searchQuery
@@ -899,7 +952,7 @@ Panel {
         value: root.selectedFeed
         options: [{ value: "", label: "All feeds" }].concat(
           root.config.feeds.map(function(feed) {
-            var v = String(feed.name || feed.url)
+            var v = root.feedDisplayName(feed)
             return { value: v, label: v }
           }))
         onHovered: function(isHovered) {}
@@ -909,9 +962,22 @@ Panel {
 
       Text {
         visible: !root.detailOpen && !root.settingsOpen && root.visibleArticles.length === 0
-        text: root.loading ? "Fetching articles…" : (root.articles.length ? "No articles match the current filters." : "No saved articles yet. Configure a feed to start — new articles download in the background so they're ready the moment you open them.")
+        text: root.loading ? "Fetching articles…" : (!root.config.feeds.length
+          ? "No feeds configured yet. Add a source to start reading."
+          : (root.articles.length
+            ? "No articles match the current filters."
+            : "Your feeds are configured, but no articles have been saved yet. Try Refresh."))
         color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
         wrapMode: Text.WordWrap; width: parent.width
+      }
+
+      Button {
+        visible: !root.detailOpen && !root.settingsOpen && !root.loading && !root.config.feeds.length
+        text: "Configure feeds"
+        foreground: root.foreground
+        focusable: true
+        onActiveFocusChanged: root.formControlFocused = activeFocus
+        onClicked: root.openSettings()
       }
 
       Flow {
@@ -964,17 +1030,20 @@ Panel {
         }
         Text {
           width: parent.width
-          text: root.selectedArticle
-            ? String(root.selectedArticle.feed || "") + " · " + String(root.selectedArticle.published || "")
-              + (root.selectedArticle.cached ? " · ⚡ ready to read" : "")
-            : ""
+          text: root.selectedArticle ? root.articleMeta(root.selectedArticle) : ""
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
           textFormat: Text.PlainText
         }
         Text {
+          visible: root.selectedArticle && String(root.selectedArticle.summary || "") !== ""
           width: parent.width
-          text: root.selectedArticle ? root.selectedArticle.summary : ""
+          text: "RSS SUMMARY"
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+        }
+        Text {
+          width: parent.width
+          text: root.selectedArticle ? root.articleSummary(root.selectedArticle) : ""
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
@@ -993,6 +1062,12 @@ Panel {
           color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
+        }
+        Text {
+          visible: !root.articleLoading && root.articleError === "" && root.articleContent !== ""
+          width: parent.width
+          text: "FULL ARTICLE"
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
         }
         Text {
           width: parent.width
@@ -1015,7 +1090,7 @@ Panel {
             required property var modelData
             required property int index
             width: column.width
-            height: title.implicitHeight + meta.implicitHeight + summary.implicitHeight + Style.space(18)
+            height: badges.implicitHeight + title.implicitHeight + meta.implicitHeight + summary.implicitHeight + Style.space(27)
             color: index === root.selectedIndex
               ? Style.selectedFillFor(root.foreground, Color.accent)
               : Style.normalFillFor(root.foreground, Color.accent)
@@ -1026,9 +1101,24 @@ Panel {
 
             Column {
               anchors.fill: parent; anchors.margins: Style.space(9); spacing: Style.space(3)
+              Flow {
+                id: badges
+                width: parent.width
+                spacing: Style.space(6)
+                Text {
+                  text: modelData.read ? "READ" : "UNREAD"
+                  color: modelData.read ? root.dim : Color.accent
+                  font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+                }
+                Text {
+                  visible: modelData.cached
+                  text: "⚡ READY"
+                  color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
+              }
               Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-              Text { id: meta; width: parent.width; text: String(modelData.feed || "") + " · " + String(modelData.published || "") + (modelData.cached ? " · ⚡ ready to read" : ""); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-              Text { id: summary; width: parent.width; text: modelData.summary || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+              Text { id: meta; width: parent.width; text: root.articleMeta(modelData); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+              Text { id: summary; width: parent.width; text: root.articleSummary(modelData); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
             }
             MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = index; root.showArticle(modelData) } }
           }

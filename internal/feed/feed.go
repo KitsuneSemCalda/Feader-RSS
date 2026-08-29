@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
-	"html"
+	stdhtml "html"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	htmlparser "golang.org/x/net/html"
 
 	"github.com/KitsuneSemCalda/feader-rss/internal/safefetch"
 )
@@ -26,8 +29,14 @@ type Item struct {
 	URL       string `json:"url"`
 	Feed      string `json:"feed"`
 	Published string `json:"published"`
-	Summary   string `json:"summary"`
-	Read      bool   `json:"read"`
+	// PublishedAt is a Unix timestamp used for reliable cross-format sorting.
+	// Published keeps the source text so the UI can show a useful fallback when
+	// a publisher uses a non-standard date format.
+	PublishedAt int64    `json:"publishedAt,omitempty"`
+	Author      string   `json:"author,omitempty"`
+	Categories  []string `json:"categories,omitempty"`
+	Summary     string   `json:"summary"`
+	Read        bool     `json:"read"`
 	// Cached reports whether the article's full text has already been
 	// prefetched, so the UI can tell readers which articles will open
 	// instantly. It is only populated by store.List, never by feed parsing.
@@ -46,11 +55,14 @@ type rssChannel struct {
 }
 
 type rssItem struct {
-	Title       string `xml:"title"`
-	Link        string `xml:"link"`
-	PubDate     string `xml:"pubDate"`
-	Description string `xml:"description"`
-	Content     string `xml:"encoded"` // content:encoded, matched by local name
+	Title       string   `xml:"title"`
+	Link        string   `xml:"link"`
+	PubDate     string   `xml:"pubDate"`
+	Description string   `xml:"description"`
+	Content     string   `xml:"encoded"` // content:encoded, matched by local name
+	Author      string   `xml:"author"`
+	Creator     string   `xml:"creator"` // dc:creator, matched by local name
+	Categories  []string `xml:"category"`
 }
 
 // --- Atom ---
@@ -61,12 +73,15 @@ type atomDoc struct {
 }
 
 type atomEntry struct {
-	Title     string     `xml:"title"`
-	Links     []atomLink `xml:"link"`
-	Published string     `xml:"published"`
-	Updated   string     `xml:"updated"`
-	Summary   string     `xml:"summary"`
-	Content   string     `xml:"content"`
+	Title      string         `xml:"title"`
+	ID         string         `xml:"id"`
+	Links      []atomLink     `xml:"link"`
+	Published  string         `xml:"published"`
+	Updated    string         `xml:"updated"`
+	Summary    string         `xml:"summary"`
+	Content    string         `xml:"content"`
+	Authors    []atomAuthor   `xml:"author"`
+	Categories []atomCategory `xml:"category"`
 }
 
 type atomLink struct {
@@ -74,22 +89,180 @@ type atomLink struct {
 	Rel  string `xml:"rel,attr"`
 }
 
+type atomAuthor struct {
+	Name  string `xml:"name"`
+	Email string `xml:"email"`
+}
+
+type atomCategory struct {
+	Term string `xml:"term,attr"`
+}
+
 var tagRE = regexp.MustCompile(`<[^>]+>`)
 var spaceBeforePunctRE = regexp.MustCompile(`\s+([,.;:!?])`)
 
-// clean strips HTML tags and unescapes entities, collapsing whitespace like
-// the original Python implementation.
+var summaryBlockTags = map[string]bool{
+	"article": true, "blockquote": true, "br": true, "div": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true,
+	"h6": true, "li": true, "p": true, "pre": true, "section": true,
+	"tr": true,
+}
+
+var summarySkipTags = map[string]bool{
+	"aside": true, "canvas": true, "footer": true, "form": true,
+	"header": true, "nav": true, "script": true, "style": true,
+	"svg": true,
+}
+
+// clean extracts readable text from an RSS/Atom HTML fragment. Using the HTML
+// parser instead of a tag regexp prevents script/style contents from leaking
+// into the article summary and preserves paragraph boundaries for the UI.
 func clean(value string) string {
-	value = html.UnescapeString(value)
+	doc, err := htmlparser.Parse(strings.NewReader(value))
+	if err != nil {
+		return cleanFallback(value)
+	}
+
+	var parts []string
+	var walk func(*htmlparser.Node)
+	walk = func(n *htmlparser.Node) {
+		if n.Type == htmlparser.ElementNode {
+			tag := strings.ToLower(n.Data)
+			if summarySkipTags[tag] {
+				return
+			}
+			if summaryBlockTags[tag] {
+				parts = append(parts, "\n")
+			}
+			for child := n.FirstChild; child != nil; child = child.NextSibling {
+				walk(child)
+			}
+			if summaryBlockTags[tag] {
+				parts = append(parts, "\n")
+			}
+			return
+		}
+		if n.Type == htmlparser.TextNode {
+			text := strings.Join(strings.Fields(n.Data), " ")
+			if text != "" {
+				parts = append(parts, text+" ")
+			}
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+	return normalizeText(strings.Join(parts, ""))
+}
+
+func cleanFallback(value string) string {
+	value = stdhtml.UnescapeString(value)
 	value = tagRE.ReplaceAllString(value, " ")
-	value = strings.Join(strings.Fields(value), " ")
-	return spaceBeforePunctRE.ReplaceAllString(value, "$1")
+	return normalizeText(value)
+}
+
+func normalizeText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	lines := strings.Split(value, "\n")
+	result := make([]string, 0, len(lines))
+	blank := false
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		line = spaceBeforePunctRE.ReplaceAllString(line, "$1")
+		if line == "" {
+			if len(result) > 0 && !blank {
+				result = append(result, "")
+			}
+			blank = true
+			continue
+		}
+		result = append(result, line)
+		blank = false
+	}
+	return strings.TrimSpace(strings.Join(result, "\n"))
 }
 
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
 			return strings.Join(strings.Fields(v), " ")
+		}
+	}
+	return ""
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+// PublishedTimestamp parses the date formats commonly emitted by RSS 2.0 and
+// Atom. It returns zero when the publisher's date is not parseable.
+func PublishedTimestamp(value string) int64 {
+	value = strings.TrimSpace(value)
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		time.DateOnly,
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC822Z,
+		time.RFC822,
+		time.RFC850,
+		time.UnixDate,
+		time.ANSIC,
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.Unix()
+		}
+	}
+	return 0
+}
+
+func normalizeCategories(values ...string) []string {
+	seen := make(map[string]bool)
+	categories := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Join(strings.Fields(value), " ")
+		key := strings.ToLower(value)
+		if value == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		categories = append(categories, value)
+	}
+	return categories
+}
+
+func resolveLink(raw string, base *url.URL) string {
+	link := firstNonEmpty(raw)
+	if link == "" || base == nil {
+		return link
+	}
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return link
+	}
+	return base.ResolveReference(parsed).String()
+}
+
+func atomAuthorName(authors []atomAuthor) string {
+	for _, author := range authors {
+		if name := firstNonEmpty(author.Name); name != "" {
+			return name
+		}
+		if email := firstNonEmpty(author.Email); email != "" {
+			return email
 		}
 	}
 	return ""
@@ -103,15 +276,19 @@ func articleID(feedName, link string) string {
 // Parse decodes RSS 2.0 or Atom XML, returning normalized items. It
 // autodetects the format from the root element.
 func Parse(name string, data []byte) ([]Item, error) {
+	return parse(name, data, nil)
+}
+
+func parse(name string, data []byte, base *url.URL) ([]Item, error) {
 	root, err := rootElementName(data)
 	if err != nil {
 		return nil, err
 	}
 	switch root {
 	case "rss":
-		return parseRSS(name, data)
+		return parseRSS(name, data, base)
 	case "feed":
-		return parseAtom(name, data)
+		return parseAtom(name, data, base)
 	default:
 		return nil, fmt.Errorf("unsupported feed format: root element <%s>", root)
 	}
@@ -133,59 +310,63 @@ func rootElementName(data []byte) (string, error) {
 	}
 }
 
-func parseRSS(name string, data []byte) ([]Item, error) {
+func parseRSS(name string, data []byte, base *url.URL) ([]Item, error) {
 	var doc rssDoc
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("invalid RSS: %w", err)
 	}
 	items := make([]Item, 0, len(doc.Channel.Items))
 	for _, it := range doc.Channel.Items {
-		title := firstNonEmpty(it.Title)
-		link := firstNonEmpty(it.Link)
+		title := clean(firstNonEmpty(it.Title))
+		link := resolveLink(it.Link, base)
 		if title == "" || link == "" {
 			continue
 		}
-		summary := clean(firstNonEmpty(it.Description, it.Content))
-		if len(summary) > MaxSummaryLength {
-			summary = summary[:MaxSummaryLength]
-		}
+		published := firstNonEmpty(it.PubDate)
 		items = append(items, Item{
-			ID:        articleID(name, link),
-			Title:     title,
-			URL:       link,
-			Feed:      name,
-			Published: firstNonEmpty(it.PubDate),
-			Summary:   summary,
-			Read:      false,
+			ID:          articleID(name, link),
+			Title:       title,
+			URL:         link,
+			Feed:        name,
+			Published:   published,
+			PublishedAt: PublishedTimestamp(published),
+			Author:      clean(firstNonEmpty(it.Author, it.Creator)),
+			Categories:  normalizeCategories(it.Categories...),
+			Summary:     truncateRunes(clean(firstNonEmpty(it.Content, it.Description)), MaxSummaryLength),
+			Read:        false,
 		})
 	}
 	return items, nil
 }
 
-func parseAtom(name string, data []byte) ([]Item, error) {
+func parseAtom(name string, data []byte, base *url.URL) ([]Item, error) {
 	var doc atomDoc
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("invalid Atom: %w", err)
 	}
 	items := make([]Item, 0, len(doc.Entries))
 	for _, entry := range doc.Entries {
-		title := firstNonEmpty(entry.Title)
-		link := atomLinkHref(entry.Links)
+		title := clean(firstNonEmpty(entry.Title))
+		link := resolveLink(atomLinkHref(entry.Links), base)
 		if title == "" || link == "" {
 			continue
 		}
-		summary := clean(firstNonEmpty(entry.Summary, entry.Content))
-		if len(summary) > MaxSummaryLength {
-			summary = summary[:MaxSummaryLength]
+		published := firstNonEmpty(entry.Published, entry.Updated)
+		categories := make([]string, 0, len(entry.Categories))
+		for _, category := range entry.Categories {
+			categories = append(categories, category.Term)
 		}
 		items = append(items, Item{
-			ID:        articleID(name, link),
-			Title:     title,
-			URL:       link,
-			Feed:      name,
-			Published: firstNonEmpty(entry.Published, entry.Updated),
-			Summary:   summary,
-			Read:      false,
+			ID:          articleID(name, link),
+			Title:       title,
+			URL:         link,
+			Feed:        name,
+			Published:   published,
+			PublishedAt: PublishedTimestamp(published),
+			Author:      clean(atomAuthorName(entry.Authors)),
+			Categories:  normalizeCategories(categories...),
+			Summary:     truncateRunes(clean(firstNonEmpty(entry.Summary, entry.Content)), MaxSummaryLength),
+			Read:        false,
 		})
 	}
 	return items, nil
@@ -206,8 +387,8 @@ func atomLinkHref(links []atomLink) string {
 }
 
 // Fetch downloads and parses the feed at url, labelling items with name.
-func Fetch(name, url string) ([]Item, error) {
-	resp, err := safefetch.Get(url, 15*time.Second)
+func Fetch(name, rawURL string) ([]Item, error) {
+	resp, err := safefetch.Get(rawURL, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -217,5 +398,6 @@ func Fetch(name, url string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Parse(name, data)
+	base, _ := url.Parse(rawURL)
+	return parse(name, data, base)
 }

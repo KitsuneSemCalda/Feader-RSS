@@ -2,6 +2,28 @@
 
 All notable changes to Feader RSS are documented in this file.
 
+## [0.3.1] - 2026-08-28
+
+### Security
+- `scripts/install.sh` now fails closed if `checksums.txt` cannot be fetched, instead of warning and installing the binary unverified.
+- Added a build-provenance attestation check (`gh attestation verify`) so the downloaded binary is cryptographically bound to the exact commit/workflow run that built it, rather than trusting a checksum sourced from the same mutable release.
+- The release workflow now generates a signed attestation (`actions/attest-build-provenance`) for every release binary, `checksums.txt`, and the plugin archive.
+- `internal/safefetch` now rejects HTTP responses outside the 2xx range before parsing or storing any content.
+
+### Fixed
+- Fixed a race condition in the release workflow where parallel per-platform build jobs wrote to a shared `checksums.txt`; each platform now produces its own checksum file, combined and validated (exactly 4 entries) in the release job.
+
+### Added
+- Feeds now carry author and category metadata (RSS `<author>`/`dc:creator`, Atom `<author>`), shown in the article list and detail view.
+- Article summaries are now extracted with an HTML parser instead of a tag-stripping regexp, preserving paragraph breaks and excluding `script`/`style` content.
+- Relative article links are now resolved against the feed's URL.
+- Articles are sorted by a normalized `published_at` timestamp (parsed from RSS/Atom date formats) instead of raw string comparison, with existing SQLite databases migrated and backfilled automatically.
+- `Panel.qml` now respects `XDG_CONFIG_HOME` for the feed configuration path.
+- Clearer empty states and an inline "Configure feeds" action when no feed is set up yet.
+
+### Removed
+- A leftover `console.warn("DEBUG ...")` that fired on every unread-notification update.
+
 ## [0.3.0] - 2026-08-27
 
 ### Changed

@@ -23,17 +23,23 @@ const legacyStateFilename = "items.json"
 
 const schema = `
 CREATE TABLE IF NOT EXISTS articles (
-	id         TEXT PRIMARY KEY,
-	feed       TEXT NOT NULL,
-	title      TEXT NOT NULL,
-	url        TEXT NOT NULL,
-	published  TEXT NOT NULL DEFAULT '',
-	summary    TEXT NOT NULL DEFAULT '',
-	content    TEXT,
-	read       INTEGER NOT NULL DEFAULT 0,
-	first_seen TEXT NOT NULL
+	id            TEXT PRIMARY KEY,
+	feed          TEXT NOT NULL,
+	title         TEXT NOT NULL,
+	url           TEXT NOT NULL,
+	published     TEXT NOT NULL DEFAULT '',
+	published_at  INTEGER NOT NULL DEFAULT 0,
+	summary       TEXT NOT NULL DEFAULT '',
+	author        TEXT NOT NULL DEFAULT '',
+	categories    TEXT NOT NULL DEFAULT '',
+	content       TEXT,
+	read          INTEGER NOT NULL DEFAULT 0,
+	first_seen    TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published DESC);
+`
+
+const indexSchema = `
+CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at DESC, first_seen DESC);
 `
 
 // Store wraps a SQLite-backed article database.
@@ -57,13 +63,103 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
+	if err := ensureColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
+	if _, err := db.Exec(indexSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("applying indexes: %w", err)
+	}
 	s := &Store{db: db}
+	if err := s.backfillPublishedAt(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not normalize stored publication dates: %s\n", err)
+	}
 	if err := s.autoMigrateLegacyState(path); err != nil {
 		// Never fail startup over a migration hiccup: the app should still
 		// work with an empty history rather than refuse to open.
 		fmt.Fprintf(os.Stderr, "warning: could not migrate legacy state: %s\n", err)
 	}
 	return s, nil
+}
+
+// ensureColumns adds fields introduced after the initial SQLite migration to
+// databases that already exist on a user's machine.
+func ensureColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(articles)`)
+	if err != nil {
+		return err
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "published_at", definition: "published_at INTEGER NOT NULL DEFAULT 0"},
+		{name: "author", definition: "author TEXT NOT NULL DEFAULT ''"},
+		{name: "categories", definition: "categories TEXT NOT NULL DEFAULT ''"},
+	} {
+		if columns[column.name] {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE articles ADD COLUMN " + column.definition); err != nil {
+			return fmt.Errorf("adding %s: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) backfillPublishedAt() error {
+	rows, err := s.db.Query(`
+		SELECT id, published FROM articles
+		WHERE published_at = 0 AND published != ''
+	`)
+	if err != nil {
+		return err
+	}
+	type articleDate struct {
+		id        string
+		published string
+	}
+	var dates []articleDate
+	for rows.Next() {
+		var date articleDate
+		if err := rows.Scan(&date.id, &date.published); err != nil {
+			rows.Close()
+			return err
+		}
+		dates = append(dates, date)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, date := range dates {
+		if timestamp := feed.PublishedTimestamp(date.published); timestamp > 0 {
+			if _, err := s.db.Exec(`UPDATE articles SET published_at = ? WHERE id = ?`, timestamp, date.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // autoMigrateLegacyState imports the old JSON state file (if present) into
@@ -111,8 +207,8 @@ func (s *Store) autoMigrateLegacyState(dbPath string) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Upsert inserts new items and updates the mutable fields (title, published,
-// summary) of existing ones, without touching their stored `read` flag.
+// Upsert inserts new items and updates mutable feed fields (title, published,
+// summary, author, categories) without touching their stored `read` flag.
 // It returns the subset of items that were not previously known, so callers
 // can surface "new article" notifications.
 func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
@@ -134,16 +230,23 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 	var fresh []feed.Item
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, item := range items {
+		publishedAt := item.PublishedAt
+		if publishedAt == 0 {
+			publishedAt = feed.PublishedTimestamp(item.Published)
+		}
 		_, err := tx.Exec(`
-			INSERT INTO articles (id, feed, title, url, published, summary, read, first_seen)
-			VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+			INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, first_seen)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				feed = excluded.feed,
 				title = excluded.title,
 				url = excluded.url,
 				published = excluded.published,
-				summary = excluded.summary
-		`, item.ID, item.Feed, item.Title, item.URL, item.Published, item.Summary, now)
+				published_at = excluded.published_at,
+				summary = excluded.summary,
+				author = excluded.author,
+				categories = excluded.categories
+		`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), now)
 		if err != nil {
 			return nil, fmt.Errorf("upserting article %s: %w", item.ID, err)
 		}
@@ -161,10 +264,10 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 // capped at limit (0 or negative means no cap).
 func (s *Store) List(limit int) ([]feed.Item, error) {
 	query := `
-		SELECT id, feed, title, url, published, summary, read,
+		SELECT id, feed, title, url, published, published_at, summary, author, categories, read,
 			CASE WHEN content IS NOT NULL AND content != '' THEN 1 ELSE 0 END AS cached
 		FROM articles
-		ORDER BY published DESC
+		ORDER BY published_at DESC, first_seen DESC, id DESC
 	`
 	args := []interface{}{}
 	if limit > 0 {
@@ -181,11 +284,13 @@ func (s *Store) List(limit int) ([]feed.Item, error) {
 	for rows.Next() {
 		var it feed.Item
 		var read, cached int
-		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.Summary, &read, &cached); err != nil {
+		var categories string
+		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read, &cached); err != nil {
 			return nil, err
 		}
 		it.Read = read != 0
 		it.Cached = cached != 0
+		it.Categories = decodeCategories(categories)
 		items = append(items, it)
 	}
 	return items, rows.Err()
@@ -260,10 +365,10 @@ func (s *Store) IDForURL(url string) (string, error) {
 // cache for the articles a reader is most likely to open next.
 func (s *Store) PendingPrefetch(limit int) ([]feed.Item, error) {
 	query := `
-		SELECT id, feed, title, url, published, summary, read
+		SELECT id, feed, title, url, published, published_at, summary, author, categories, read
 		FROM articles
 		WHERE read = 0 AND (content IS NULL OR content = '')
-		ORDER BY published DESC
+		ORDER BY published_at DESC, first_seen DESC, id DESC
 	`
 	args := []interface{}{}
 	if limit > 0 {
@@ -280,10 +385,12 @@ func (s *Store) PendingPrefetch(limit int) ([]feed.Item, error) {
 	for rows.Next() {
 		var it feed.Item
 		var read int
-		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.Summary, &read); err != nil {
+		var categories string
+		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read); err != nil {
 			return nil, err
 		}
 		it.Read = read != 0
+		it.Categories = decodeCategories(categories)
 		items = append(items, it)
 	}
 	return items, rows.Err()
@@ -305,11 +412,15 @@ func (s *Store) Import(items []feed.Item) (imported int, err error) {
 		if item.ID == "" || item.URL == "" || item.Title == "" {
 			continue
 		}
+		publishedAt := item.PublishedAt
+		if publishedAt == 0 {
+			publishedAt = feed.PublishedTimestamp(item.Published)
+		}
 		res, err := tx.Exec(`
-			INSERT INTO articles (id, feed, title, url, published, summary, read, first_seen)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, first_seen)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO NOTHING
-		`, item.ID, item.Feed, item.Title, item.URL, item.Published, item.Summary, boolToInt(item.Read), now)
+		`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), boolToInt(item.Read), now)
 		if err != nil {
 			return 0, fmt.Errorf("importing article %s: %w", item.ID, err)
 		}
@@ -340,4 +451,26 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func encodeCategories(categories []string) string {
+	if len(categories) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(categories)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeCategories(value string) []string {
+	if value == "" {
+		return []string{}
+	}
+	var categories []string
+	if err := json.Unmarshal([]byte(value), &categories); err != nil || categories == nil {
+		return []string{}
+	}
+	return categories
 }

@@ -83,7 +83,8 @@ class UiAccessibilityContractTests(unittest.TestCase):
         # (internal/store.Upsert never overwrites the stored `read` flag);
         # the panel just filters whatever the backend returns down to the
         # feeds still configured.
-        self.assertIn("names[String(feed.name)] = true", PANEL)
+        self.assertIn("var name = root.feedDisplayName(feed)", PANEL)
+        self.assertIn("names[name] = true", PANEL)
         self.assertIn("names[String(article.feed || \"\")] === true", PANEL)
 
     def test_clicking_an_article_marks_the_opened_item_read(self):
@@ -97,7 +98,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
     def test_feed_names_are_inferred_but_custom_names_are_preserved(self):
         self.assertIn("function inferFeedName(url)", PANEL)
         self.assertIn("root.inferFeedName(url) || url", PANEL)
-        self.assertIn("root.inferFeedName(feed.url)", PANEL)
+        self.assertIn("root.feedDisplayName(feed)", PANEL)
         self.assertIn("onEditingFinished", PANEL)
 
     def test_feed_form_declares_model_roles_explicitly(self):
@@ -128,7 +129,8 @@ class UiAccessibilityContractTests(unittest.TestCase):
         # used to bleed those digits past the slot and over the neighboring
         # bar widget. Unread state is now conveyed via `active` instead.
         self.assertIn('readonly property string label: ""', PANEL)
-        self.assertIn("readonly property int refreshSeconds: Math.max(60, Math.min(300", PANEL)
+        self.assertIn("var minutes = Number(config && config.refreshMinutes)", PANEL)
+        self.assertIn("Math.max(60, Math.min(300, minutes * 60))", PANEL)
         self.assertIn('text: panelLoader.item ? panelLoader.item.label : ""', BAR)
         self.assertIn("active: panelLoader.item ? panelLoader.item.unreadCount > 0 : false", BAR)
         self.assertIn("tooltipText: panelLoader.item ? panelLoader.item.unreadSummary", BAR)
@@ -140,8 +142,17 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertNotIn("delegate: Rectangle", PANEL)
 
     def test_article_surface_covers_metadata_and_uses_compact_gap(self):
-        self.assertIn("height: title.implicitHeight + meta.implicitHeight + summary.implicitHeight", PANEL)
+        self.assertIn("height: badges.implicitHeight + title.implicitHeight + meta.implicitHeight + summary.implicitHeight + Style.space(27)", PANEL)
         self.assertIn("spacing: Style.space(6)", PANEL)
+
+    def test_article_cards_expose_rich_feed_metadata(self):
+        self.assertIn("function feedDisplayName(feed)", PANEL)
+        self.assertIn("function articleMeta(article)", PANEL)
+        self.assertIn("String(article.author || \"\")", PANEL)
+        self.assertIn("article.categories", PANEL)
+        self.assertIn("text: modelData.read ? \"READ\" : \"UNREAD\"", PANEL)
+        self.assertIn('text: "RSS SUMMARY"', PANEL)
+        self.assertIn('text: "FULL ARTICLE"', PANEL)
 
     def test_text_and_actions_adapt_to_available_width(self):
         self.assertGreaterEqual(PANEL.count("Flow {"), 6)

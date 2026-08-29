@@ -71,8 +71,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           out="feader-rss-fetch_${version}_${GOOS}_${GOARCH}"
+          checksum="checksums_${GOOS}_${GOARCH}.txt"
           go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "${out}" ./cmd/feader-rss-fetch
-          sha256sum "${out}" >> checksums.txt
+          sha256sum "${out}" > "${checksum}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -80,7 +81,7 @@ jobs:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             feader-rss-fetch_*
-            checksums.txt
+            checksums_${{ matrix.goos }}_${{ matrix.goarch }}.txt
           retention-days: 1
 
   release:
@@ -101,8 +102,18 @@ jobs:
 
       - name: Combine checksums
         run: |
-          cat dist/checksums.txt | sort -u -k2 > checksums.txt
-          rm -f dist/checksums.txt
+          shopt -s nullglob
+          checksum_files=(dist/checksums_*.txt)
+          if [ "${#checksum_files[@]}" -ne 4 ]; then
+            echo "Expected four per-platform checksum files, found ${#checksum_files[@]}" >&2
+            exit 1
+          fi
+          sort -k2 "${checksum_files[@]}" > checksums.txt
+          if [ "$(wc -l < checksums.txt)" -ne 4 ]; then
+            echo "Expected four checksum entries" >&2
+            exit 1
+          fi
+          rm -f "${checksum_files[@]}"
 
       - name: Read plugin metadata
         id: metadata

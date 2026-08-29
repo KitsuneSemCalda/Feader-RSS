@@ -151,7 +151,25 @@ func Get(rawURL string, timeout time.Duration) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", UserAgent)
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkResponse(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
+func checkResponse(resp *http.Response) error {
+	if resp == nil {
+		return fmt.Errorf("empty HTTP response")
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+	}
+	return nil
 }
 
 // ReadCapped reads at most limit+1 bytes from r, returning an error instead
