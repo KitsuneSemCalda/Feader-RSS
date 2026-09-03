@@ -1,4 +1,4 @@
-# Migração do backend para Go
+# Feader RSS — TODO
 
 Objetivo: substituir `rss-fetch.py` por um binário Go (`feader-rss-fetch` ou similar),
 mantendo a mesma interface CLI (args + stdout JSON) para não precisar tocar no QML

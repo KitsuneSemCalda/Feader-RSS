@@ -4,6 +4,9 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Renamed `TODO-go-migration.md` to `TODO.md` as the ongoing project roadmap.
+
 ## [0.3.2] - 2026-09-03
 
 ### Added
