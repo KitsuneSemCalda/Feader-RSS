@@ -57,8 +57,10 @@ BarWidget {
     bar: root.bar
     text: panelLoader.item ? panelLoader.item.label : ""
     active: panelLoader.item ? panelLoader.item.unreadCount > 0 : false
-    tooltipText: panelLoader.item ? panelLoader.item.unreadSummary : "Feader RSS"
+    tooltipText: panelLoader.item ? panelLoader.item.unreadSummary
+      + "\nClick open · middle refresh · right first unread" : "Feader RSS"
     onPressed: function(buttonCode) {
+      if (!panelLoader.item) return
       if (buttonCode === Qt.MiddleButton) panelLoader.item.refresh()
       else if (buttonCode === Qt.RightButton) panelLoader.item.openAllUnread()
       else panelLoader.item.toggle()

@@ -1,7 +1,19 @@
 {
   "maxItems": 200,
+  "retentionItems": 1000,
   "refreshMinutes": 5,
   "scrollStep": 54,
   "panelGap": 8,
+  "shortcuts": {
+    "refresh": "r",
+    "settings": "s",
+    "search": "/",
+    "markAllRead": "a",
+    "openArticle": "o",
+    "filterAll": "1",
+    "filterUnread": "2",
+    "filterRead": "3",
+    "filterStarred": "4"
+  },
   "feeds": []
 }

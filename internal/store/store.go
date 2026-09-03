@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -34,12 +35,30 @@ CREATE TABLE IF NOT EXISTS articles (
 	categories    TEXT NOT NULL DEFAULT '',
 	content       TEXT,
 	read          INTEGER NOT NULL DEFAULT 0,
+	starred       INTEGER NOT NULL DEFAULT 0,
+	tags          TEXT NOT NULL DEFAULT '',
+	prefetch_attempts INTEGER NOT NULL DEFAULT 0,
+	prefetch_next_at TEXT NOT NULL DEFAULT '',
+	prefetch_error TEXT NOT NULL DEFAULT '',
 	first_seen    TEXT NOT NULL
 );
 `
 
 const indexSchema = `
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at DESC, first_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url);
+`
+
+const ftsSchema = `
+CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+	 id UNINDEXED,
+	 title,
+	 summary,
+	 content,
+	 author,
+	 categories,
+	 tags
+);
 `
 
 // Store wraps a SQLite-backed article database.
@@ -71,6 +90,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("applying indexes: %w", err)
 	}
+	if _, err := db.Exec(ftsSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("applying full-text search schema: %w", err)
+	}
 	s := &Store{db: db}
 	if err := s.backfillPublishedAt(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not normalize stored publication dates: %s\n", err)
@@ -79,6 +102,10 @@ func Open(path string) (*Store, error) {
 		// Never fail startup over a migration hiccup: the app should still
 		// work with an empty history rather than refuse to open.
 		fmt.Fprintf(os.Stderr, "warning: could not migrate legacy state: %s\n", err)
+	}
+	if err := rebuildFTS(s.db); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("building full-text search index: %w", err)
 	}
 	return s, nil
 }
@@ -114,6 +141,11 @@ func ensureColumns(db *sql.DB) error {
 		{name: "published_at", definition: "published_at INTEGER NOT NULL DEFAULT 0"},
 		{name: "author", definition: "author TEXT NOT NULL DEFAULT ''"},
 		{name: "categories", definition: "categories TEXT NOT NULL DEFAULT ''"},
+		{name: "starred", definition: "starred INTEGER NOT NULL DEFAULT 0"},
+		{name: "tags", definition: "tags TEXT NOT NULL DEFAULT ''"},
+		{name: "prefetch_attempts", definition: "prefetch_attempts INTEGER NOT NULL DEFAULT 0"},
+		{name: "prefetch_next_at", definition: "prefetch_next_at TEXT NOT NULL DEFAULT ''"},
+		{name: "prefetch_error", definition: "prefetch_error TEXT NOT NULL DEFAULT ''"},
 	} {
 		if columns[column.name] {
 			continue
@@ -123,6 +155,22 @@ func ensureColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+type sqlExecer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+func rebuildFTS(execer sqlExecer) error {
+	if _, err := execer.Exec(`DELETE FROM articles_fts`); err != nil {
+		return err
+	}
+	_, err := execer.Exec(`
+		INSERT INTO articles_fts (id, title, summary, content, author, categories, tags)
+		SELECT id, title, summary, COALESCE(content, ''), author, categories, tags
+		FROM articles
+	`)
+	return err
 }
 
 func (s *Store) backfillPublishedAt() error {
@@ -208,10 +256,11 @@ func (s *Store) autoMigrateLegacyState(dbPath string) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 // Upsert inserts new items and updates mutable feed fields (title, published,
-// summary, author, categories) without touching their stored `read` flag.
+// summary, author, categories) without touching stored read/starred/tags flags.
 // It returns the subset of items that were not previously known, so callers
 // can surface "new article" notifications.
 func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
+	items = deduplicateItems(items)
 	ids := make([]string, len(items))
 	for i, item := range items {
 		ids[i] = item.ID
@@ -235,24 +284,27 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 			publishedAt = feed.PublishedTimestamp(item.Published)
 		}
 		_, err := tx.Exec(`
-			INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, first_seen)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-			ON CONFLICT(id) DO UPDATE SET
+				INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, starred, tags, first_seen)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET
 				feed = excluded.feed,
 				title = excluded.title,
 				url = excluded.url,
 				published = excluded.published,
 				published_at = excluded.published_at,
-				summary = excluded.summary,
-				author = excluded.author,
-				categories = excluded.categories
-		`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), now)
+					summary = excluded.summary,
+					author = excluded.author,
+					categories = excluded.categories
+			`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), boolToInt(item.Starred), encodeTags(item.Tags), now)
 		if err != nil {
 			return nil, fmt.Errorf("upserting article %s: %w", item.ID, err)
 		}
 		if !existing[item.ID] {
 			fresh = append(fresh, item)
 		}
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return nil, fmt.Errorf("updating full-text search index: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -261,15 +313,21 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 }
 
 // List returns stored articles ordered by published date (newest first),
-// capped at limit (0 or negative means no cap).
-func (s *Store) List(limit int) ([]feed.Item, error) {
+// capped at limit (0 or negative means no cap). Optional feed names scope the
+// result to the feeds currently configured by the caller.
+func (s *Store) List(limit int, feedNames ...string) ([]feed.Item, error) {
 	query := `
 		SELECT id, feed, title, url, published, published_at, summary, author, categories, read,
+			starred, tags,
 			CASE WHEN content IS NOT NULL AND content != '' THEN 1 ELSE 0 END AS cached
 		FROM articles
-		ORDER BY published_at DESC, first_seen DESC, id DESC
 	`
-	args := []interface{}{}
+	where, filterArgs := feedFilter(feedNames)
+	if where != "" {
+		query += " WHERE " + where
+	}
+	query += " ORDER BY published_at DESC, first_seen DESC, id DESC"
+	args := filterArgs
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -283,17 +341,173 @@ func (s *Store) List(limit int) ([]feed.Item, error) {
 	var items []feed.Item
 	for rows.Next() {
 		var it feed.Item
-		var read, cached int
-		var categories string
-		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read, &cached); err != nil {
+		var read, starred, cached int
+		var categories, tags string
+		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read, &starred, &tags, &cached); err != nil {
 			return nil, err
 		}
 		it.Read = read != 0
+		it.Starred = starred != 0
 		it.Cached = cached != 0
 		it.Categories = decodeCategories(categories)
+		it.Tags = decodeTags(tags)
 		items = append(items, it)
 	}
 	return items, rows.Err()
+}
+
+// Search performs a full-text search across titles, summaries, cached article
+// content, authors, categories and user tags. Terms are quoted individually
+// so punctuation supplied by a user cannot become FTS5 syntax.
+func (s *Store) Search(query string, limit int) ([]feed.Item, error) {
+	return s.search(query, limit)
+}
+
+// SearchForFeeds is the feed-scoped form of Search used by the panel. The
+// separate method keeps the simple two-argument Search API convenient for
+// command-line and library callers.
+func (s *Store) SearchForFeeds(query string, limit int, feedNames ...string) ([]feed.Item, error) {
+	return s.search(query, limit, feedNames...)
+}
+
+func (s *Store) search(query string, limit int, feedNames ...string) ([]feed.Item, error) {
+	match := ftsMatchQuery(query)
+	if match == "" {
+		return []feed.Item{}, nil
+	}
+	sqlQuery := `
+		SELECT a.id, a.feed, a.title, a.url, a.published, a.published_at, a.summary, a.author,
+			a.categories, a.read, a.starred, a.tags,
+			CASE WHEN a.content IS NOT NULL AND a.content != '' THEN 1 ELSE 0 END AS cached
+		FROM articles AS a
+		JOIN articles_fts AS f ON f.id = a.id
+		WHERE articles_fts MATCH ?
+	`
+	args := []interface{}{match}
+	if where, filterArgs := feedFilter(feedNames); where != "" {
+		sqlQuery += " AND " + strings.ReplaceAll(where, "feed", "a.feed")
+		args = append(args, filterArgs...)
+	}
+	sqlQuery += " ORDER BY a.published_at DESC, a.first_seen DESC, a.id DESC"
+	if limit > 0 {
+		sqlQuery += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanArticleRows(rows)
+}
+
+func ftsMatchQuery(query string) string {
+	terms := strings.Fields(strings.TrimSpace(query))
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.TrimSpace(strings.ReplaceAll(term, `"`, ""))
+		if term == "" {
+			continue
+		}
+		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	return strings.Join(quoted, " AND ")
+}
+
+func scanArticleRows(rows *sql.Rows) ([]feed.Item, error) {
+	var items []feed.Item
+	for rows.Next() {
+		var it feed.Item
+		var read, starred, cached int
+		var categories, tags string
+		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read, &starred, &tags, &cached); err != nil {
+			return nil, err
+		}
+		it.Read = read != 0
+		it.Starred = starred != 0
+		it.Cached = cached != 0
+		it.Categories = decodeCategories(categories)
+		it.Tags = decodeTags(tags)
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+// UnreadCounts returns the unread article count and the number of feeds that
+// contain unread articles. Supplying feed names scopes the result to the
+// currently configured feeds; omitting them counts the whole database.
+func (s *Store) UnreadCounts(feedNames ...string) (unread, unreadFeeds int, err error) {
+	where := "read = 0"
+	args := make([]interface{}, 0, len(feedNames))
+	if feedWhere, feedArgs := feedFilter(feedNames); feedWhere != "" {
+		where += " AND " + feedWhere
+		args = append(args, feedArgs...)
+	}
+	err = s.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT feed) FROM articles WHERE `+where, args...).Scan(&unread, &unreadFeeds)
+	return unread, unreadFeeds, err
+}
+
+// Prune removes the oldest articles until at most maxItems remain. Read and
+// unstarred entries are preferred for removal, while unread/starred entries
+// survive longer. A non-positive value disables retention.
+func (s *Store) Prune(maxItems int) (int, error) {
+	if maxItems <= 0 {
+		return 0, nil
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM articles`).Scan(&count); err != nil {
+		return 0, err
+	}
+	if count <= maxItems {
+		return 0, nil
+	}
+	remove := count - maxItems
+	rows, err := s.db.Query(`
+		SELECT id FROM articles
+		ORDER BY read DESC, starred ASC, published_at ASC, first_seen ASC, id ASC
+		LIMIT ?
+	`, remove)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	if _, err := tx.Exec(`DELETE FROM articles WHERE id IN (`+placeholders+`)`, args...); err != nil {
+		return 0, err
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }
 
 // KnownIDs returns the subset of the given ids that already exist in the store.
@@ -328,8 +542,74 @@ func (s *Store) KnownIDs(ids []string) (map[string]bool, error) {
 
 // SetContent caches extracted article content for a given article id.
 func (s *Store) SetContent(id, content string) error {
-	_, err := s.db.Exec(`UPDATE articles SET content = ? WHERE id = ?`, content, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE articles SET content = ?, prefetch_attempts = 0, prefetch_next_at = '', prefetch_error = '' WHERE id = ?`, content, id); err != nil {
+		return err
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecordPrefetchFailure remembers a failed article fetch and delays its next
+// attempt exponentially, preventing every panel refresh from issuing the same
+// doomed request. The delay starts at one minute and is capped at six hours.
+func (s *Store) RecordPrefetchFailure(id, message string) error {
+	var attempts int
+	if err := s.db.QueryRow(`SELECT prefetch_attempts FROM articles WHERE id = ?`, id).Scan(&attempts); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if attempts < 16 {
+		attempts++
+	}
+	delay := time.Minute
+	for i := 1; i < attempts; i++ {
+		if delay >= 6*time.Hour {
+			delay = 6 * time.Hour
+			break
+		}
+		delay *= 2
+	}
+	if delay > 6*time.Hour {
+		delay = 6 * time.Hour
+	}
+	next := time.Now().UTC().Add(delay).Format(time.RFC3339)
+	_, err := s.db.Exec(`
+		UPDATE articles
+		SET prefetch_attempts = ?, prefetch_next_at = ?, prefetch_error = ?
+		WHERE id = ?
+	`, attempts, next, strings.TrimSpace(message), id)
 	return err
+}
+
+// SetStarred toggles the saved/favorite state of one article.
+func (s *Store) SetStarred(id string, starred bool) error {
+	_, err := s.db.Exec(`UPDATE articles SET starred = ? WHERE id = ?`, boolToInt(starred), id)
+	return err
+}
+
+// SetTags replaces an article's user tags.
+func (s *Store) SetTags(id string, tags []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE articles SET tags = ? WHERE id = ?`, encodeTags(tags), id); err != nil {
+		return err
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ContentForURL returns the cached content for the article with the given
@@ -365,12 +645,13 @@ func (s *Store) IDForURL(url string) (string, error) {
 // cache for the articles a reader is most likely to open next.
 func (s *Store) PendingPrefetch(limit int) ([]feed.Item, error) {
 	query := `
-		SELECT id, feed, title, url, published, published_at, summary, author, categories, read
+		SELECT id, feed, title, url, published, published_at, summary, author, categories, read, starred, tags
 		FROM articles
 		WHERE read = 0 AND (content IS NULL OR content = '')
+			AND (prefetch_next_at = '' OR prefetch_next_at <= ?)
 		ORDER BY published_at DESC, first_seen DESC, id DESC
 	`
-	args := []interface{}{}
+	args := []interface{}{time.Now().UTC().Format(time.RFC3339)}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -384,13 +665,15 @@ func (s *Store) PendingPrefetch(limit int) ([]feed.Item, error) {
 	var items []feed.Item
 	for rows.Next() {
 		var it feed.Item
-		var read int
-		var categories string
-		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read); err != nil {
+		var read, starred int
+		var categories, tags string
+		if err := rows.Scan(&it.ID, &it.Feed, &it.Title, &it.URL, &it.Published, &it.PublishedAt, &it.Summary, &it.Author, &categories, &read, &starred, &tags); err != nil {
 			return nil, err
 		}
 		it.Read = read != 0
+		it.Starred = starred != 0
 		it.Categories = decodeCategories(categories)
+		it.Tags = decodeTags(tags)
 		items = append(items, it)
 	}
 	return items, rows.Err()
@@ -417,16 +700,19 @@ func (s *Store) Import(items []feed.Item) (imported int, err error) {
 			publishedAt = feed.PublishedTimestamp(item.Published)
 		}
 		res, err := tx.Exec(`
-			INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, first_seen)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO articles (id, feed, title, url, published, published_at, summary, author, categories, read, starred, tags, first_seen)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO NOTHING
-		`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), boolToInt(item.Read), now)
+		`, item.ID, item.Feed, item.Title, item.URL, item.Published, publishedAt, item.Summary, item.Author, encodeCategories(item.Categories), boolToInt(item.Read), boolToInt(item.Starred), encodeTags(item.Tags), now)
 		if err != nil {
 			return 0, fmt.Errorf("importing article %s: %w", item.ID, err)
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			imported++
 		}
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return 0, fmt.Errorf("updating full-text search index: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -440,9 +726,16 @@ func (s *Store) MarkRead(id string, read bool) error {
 	return err
 }
 
-// MarkAllRead sets the read flag for every stored article.
-func (s *Store) MarkAllRead(read bool) error {
-	_, err := s.db.Exec(`UPDATE articles SET read = ?`, boolToInt(read))
+// MarkAllRead sets the read flag for every stored article, or only the
+// supplied feeds when feed names are provided.
+func (s *Store) MarkAllRead(read bool, feedNames ...string) error {
+	query := `UPDATE articles SET read = ?`
+	args := []interface{}{boolToInt(read)}
+	if where, filterArgs := feedFilter(feedNames); where != "" {
+		query += " WHERE " + where
+		args = append(args, filterArgs...)
+	}
+	_, err := s.db.Exec(query, args...)
 	return err
 }
 
@@ -464,6 +757,31 @@ func encodeCategories(categories []string) string {
 	return string(data)
 }
 
+func encodeTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	cleaned := make([]string, 0, len(tags))
+	seen := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		tag = strings.Join(strings.Fields(tag), " ")
+		key := strings.ToLower(tag)
+		if tag == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		cleaned = append(cleaned, tag)
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(cleaned)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 func decodeCategories(value string) []string {
 	if value == "" {
 		return []string{}
@@ -473,4 +791,54 @@ func decodeCategories(value string) []string {
 		return []string{}
 	}
 	return categories
+}
+
+func decodeTags(value string) []string {
+	if value == "" {
+		return []string{}
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(value), &tags); err != nil || tags == nil {
+		return []string{}
+	}
+	return tags
+}
+
+func feedFilter(feedNames []string) (string, []interface{}) {
+	if len(feedNames) == 0 {
+		return "", nil
+	}
+	seen := make(map[string]bool, len(feedNames))
+	placeholders := make([]string, 0, len(feedNames))
+	args := make([]interface{}, 0, len(feedNames))
+	for _, name := range feedNames {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		placeholders = append(placeholders, "?")
+		args = append(args, name)
+	}
+	if len(placeholders) == 0 {
+		return "1 = 0", nil
+	}
+	return "feed IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
+func deduplicateItems(items []feed.Item) []feed.Item {
+	seen := make(map[string]bool, len(items))
+	result := make([]feed.Item, 0, len(items))
+	for _, item := range items {
+		if item.ID == "" || item.URL == "" || item.Title == "" {
+			continue
+		}
+		key := strings.TrimSpace(item.Feed) + "\x00" + strings.TrimSpace(item.URL)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, item)
+	}
+	return result
 }

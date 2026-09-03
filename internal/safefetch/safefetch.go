@@ -7,12 +7,14 @@ package safefetch
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,51 @@ type ErrResponseTooLarge struct{ Limit int64 }
 
 func (e *ErrResponseTooLarge) Error() string {
 	return fmt.Sprintf("response exceeds %d byte limit", e.Limit)
+}
+
+// HTTPStatusError preserves the response status so callers can distinguish
+// retryable server throttling/outages from permanent client errors.
+type HTTPStatusError struct {
+	Code   int
+	Status string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("unexpected HTTP status: %s", e.Status)
+}
+
+// IsRetryable reports whether retrying a failed fetch can reasonably change
+// the outcome. DNS and transport errors are retryable; malformed input,
+// unsafe URLs, redirects and 4xx responses are not.
+func IsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.Code == http.StatusTooManyRequests || statusErr.Code >= 500
+	}
+	var tooLarge *ErrResponseTooLarge
+	if errors.As(err, &tooLarge) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, permanent := range []string{
+		"invalid url",
+		"unsupported url scheme",
+		"url is missing a hostname",
+		"refusing to contact non-public address",
+		"too many redirects",
+		"invalid xml",
+		"invalid rss",
+		"invalid atom",
+		"unsupported feed format",
+	} {
+		if strings.Contains(message, permanent) {
+			return false
+		}
+	}
+	return true
 }
 
 func isGlobalIP(addr netip.Addr) bool {
@@ -167,7 +214,7 @@ func checkResponse(resp *http.Response) error {
 		return fmt.Errorf("empty HTTP response")
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+		return &HTTPStatusError{Code: resp.StatusCode, Status: resp.Status}
 	}
 	return nil
 }

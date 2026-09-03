@@ -107,6 +107,93 @@ func TestOpenSkipsMigrationWhenDatabaseAlreadyHasData(t *testing.T) {
 	}
 }
 
+func TestSQLiteBackupAndRestoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "items.db")
+	backupPath := filepath.Join(dir, "backup", "items.db")
+
+	source, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open source: %v", err)
+	}
+	if _, err := source.Upsert([]feed.Item{{
+		ID: "saved", Feed: "Feed", Title: "Saved", URL: "https://x/saved",
+		Published: "2024-01-01", Summary: "summary", Author: "Alice",
+		Categories: []string{"News"},
+	}}); err != nil {
+		source.Close()
+		t.Fatalf("Upsert source: %v", err)
+	}
+	if err := source.SetContent("saved", "cached article"); err != nil {
+		source.Close()
+		t.Fatalf("SetContent source: %v", err)
+	}
+	if err := source.MarkRead("saved", true); err != nil {
+		source.Close()
+		t.Fatalf("MarkRead source: %v", err)
+	}
+	if err := Backup(dbPath, backupPath); err != nil {
+		source.Close()
+		t.Fatalf("Backup: %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close source: %v", err)
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(backupPath + suffix); !os.IsNotExist(err) {
+			t.Errorf("backup unexpectedly has %s sidecar, stat err = %v", suffix, err)
+		}
+	}
+
+	target, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open target: %v", err)
+	}
+	if _, err := target.Upsert([]feed.Item{
+		{ID: "saved", Feed: "Feed", Title: "Changed", URL: "https://x/saved", Published: "2024-01-02"},
+		{ID: "extra", Feed: "Feed", Title: "Extra", URL: "https://x/extra", Published: "2024-01-03"},
+	}); err != nil {
+		target.Close()
+		t.Fatalf("Upsert target: %v", err)
+	}
+	if err := target.MarkRead("saved", false); err != nil {
+		target.Close()
+		t.Fatalf("MarkRead target: %v", err)
+	}
+	if err := target.SetContent("saved", "changed article"); err != nil {
+		target.Close()
+		t.Fatalf("SetContent target: %v", err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatalf("Close target: %v", err)
+	}
+
+	if err := Restore(dbPath, backupPath); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	restored, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open restored: %v", err)
+	}
+	defer restored.Close()
+	items, err := restored.List(0)
+	if err != nil {
+		t.Fatalf("List restored: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "saved" || items[0].Title != "Saved" || !items[0].Read {
+		t.Fatalf("restored items = %+v, want the original saved item only", items)
+	}
+	content, ok, err := restored.ContentForURL("https://x/saved")
+	if err != nil {
+		t.Fatalf("ContentForURL restored: %v", err)
+	}
+	if !ok || content != "cached article" {
+		t.Fatalf("restored content = (%q, %v), want cached article", content, ok)
+	}
+}
+
 func TestUpsertAndList(t *testing.T) {
 	s := openTestStore(t)
 
@@ -438,6 +525,33 @@ func TestPendingPrefetchLimit(t *testing.T) {
 	}
 }
 
+func TestPrefetchFailuresAreBackedOffUntilTheNextWindow(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Upsert([]feed.Item{{ID: "a", Feed: "F", Title: "A", URL: "https://x/a"}}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.RecordPrefetchFailure("a", "temporary outage"); err != nil {
+		t.Fatalf("RecordPrefetchFailure: %v", err)
+	}
+	pending, err := s.PendingPrefetch(0)
+	if err != nil {
+		t.Fatalf("PendingPrefetch after failure: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending after failure = %+v, want none during backoff", pending)
+	}
+	if err := s.SetContent("a", "recovered article"); err != nil {
+		t.Fatalf("SetContent: %v", err)
+	}
+	pending, err = s.PendingPrefetch(0)
+	if err != nil {
+		t.Fatalf("PendingPrefetch after success: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("cached item should not be pending: %+v", pending)
+	}
+}
+
 func TestImportPreservesReadAndSkipsExisting(t *testing.T) {
 	s := openTestStore(t)
 
@@ -480,5 +594,133 @@ func TestImportPreservesReadAndSkipsExisting(t *testing.T) {
 	}
 	if !byID["legacy-only"].Read {
 		t.Error("expected legacy-only article to be imported as read")
+	}
+}
+
+func TestSearchIncludesCachedContentAndTags(t *testing.T) {
+	s := openTestStore(t)
+	items := []feed.Item{
+		{ID: "content", Feed: "F", Title: "A normal title", URL: "https://x/content", Published: "2024-01-02"},
+		{ID: "tagged", Feed: "F", Title: "Another title", URL: "https://x/tagged", Published: "2024-01-01"},
+	}
+	if _, err := s.Upsert(items); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.SetContent("content", "the hidden phrase lives in the cached article"); err != nil {
+		t.Fatalf("SetContent: %v", err)
+	}
+	if err := s.SetTags("tagged", []string{"bookmark", "reading"}); err != nil {
+		t.Fatalf("SetTags: %v", err)
+	}
+	if err := s.SetStarred("tagged", true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+
+	results, err := s.Search("hidden phrase", 0)
+	if err != nil {
+		t.Fatalf("Search cached content: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "content" {
+		t.Fatalf("cached-content search = %+v, want content", results)
+	}
+	results, err = s.Search("bookmark", 0)
+	if err != nil {
+		t.Fatalf("Search tag: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "tagged" || !results[0].Starred || len(results[0].Tags) != 2 {
+		t.Fatalf("tag search = %+v, want starred tagged article", results)
+	}
+}
+
+func TestUnreadCountsCanBeScopedToConfiguredFeeds(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Upsert([]feed.Item{
+		{ID: "one", Feed: "One", Title: "One", URL: "https://x/one"},
+		{ID: "two", Feed: "Two", Title: "Two", URL: "https://x/two"},
+		{ID: "two-read", Feed: "Two", Title: "Read", URL: "https://x/two-read"},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.MarkRead("two-read", true); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	unread, feeds, err := s.UnreadCounts("Two")
+	if err != nil {
+		t.Fatalf("UnreadCounts scoped: %v", err)
+	}
+	if unread != 1 || feeds != 1 {
+		t.Fatalf("scoped unread = (%d, %d), want (1, 1)", unread, feeds)
+	}
+	unread, feeds, err = s.UnreadCounts()
+	if err != nil {
+		t.Fatalf("UnreadCounts global: %v", err)
+	}
+	if unread != 2 || feeds != 2 {
+		t.Fatalf("global unread = (%d, %d), want (2, 2)", unread, feeds)
+	}
+}
+
+func TestUpsertDeduplicatesSameFeedAndURL(t *testing.T) {
+	s := openTestStore(t)
+	fresh, err := s.Upsert([]feed.Item{
+		{ID: "first", Feed: "F", Title: "First", URL: "https://x/same"},
+		{ID: "second", Feed: "F", Title: "Duplicate", URL: "https://x/same"},
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if len(fresh) != 1 || fresh[0].ID != "first" {
+		t.Fatalf("fresh = %+v, want only first item", fresh)
+	}
+	items, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "first" {
+		t.Fatalf("deduplicated list = %+v", items)
+	}
+}
+
+func TestPrunePrefersReadAndUnstarredItems(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Upsert([]feed.Item{
+		{ID: "old-read", Feed: "F", Title: "Old read", URL: "https://x/old-read", Published: "2024-01-01"},
+		{ID: "old-starred", Feed: "F", Title: "Old starred", URL: "https://x/old-starred", Published: "2024-01-02"},
+		{ID: "new-unread", Feed: "F", Title: "New unread", URL: "https://x/new-unread", Published: "2024-01-03"},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.MarkRead("old-read", true); err != nil {
+		t.Fatalf("MarkRead old-read: %v", err)
+	}
+	if err := s.MarkRead("old-starred", true); err != nil {
+		t.Fatalf("MarkRead old-starred: %v", err)
+	}
+	if err := s.SetStarred("old-starred", true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	removed, err := s.Prune(2)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	items, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List after prune: %v", err)
+	}
+	byID := map[string]feed.Item{}
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	if _, ok := byID["old-read"]; ok {
+		t.Fatal("old read article should have been pruned first")
+	}
+	if _, ok := byID["old-starred"]; !ok {
+		t.Fatal("starred article should survive pruning")
+	}
+	if _, ok := byID["new-unread"]; !ok {
+		t.Fatal("unread article should survive pruning")
 	}
 }

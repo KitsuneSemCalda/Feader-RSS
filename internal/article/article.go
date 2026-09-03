@@ -145,3 +145,39 @@ func Fetch(url string) (*Article, error) {
 	}
 	return &Article{URL: url, Title: title, Content: content}, nil
 }
+
+// FetchWithRetry retries only transient network/server failures. It is used
+// by the background prefetcher so a temporary outage does not get retried on
+// every refresh without a delay, while malformed or unsafe pages fail fast.
+func FetchWithRetry(url string, attempts int, backoff time.Duration) (*Article, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if backoff < 0 {
+		backoff = 0
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		result, err := Fetch(url)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt+1 >= attempts || !safefetch.IsRetryable(err) {
+			break
+		}
+		delay := backoff
+		for n := 0; n < attempt; n++ {
+			if delay >= 5*time.Second {
+				delay = 5 * time.Second
+				break
+			}
+			delay *= 2
+		}
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+		time.Sleep(delay)
+	}
+	return nil, lastErr
+}

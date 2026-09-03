@@ -1,26 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config_file="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy/rss-reader.json"
-state_file="${XDG_STATE_HOME:-${HOME}/.local/state}/omarchy/rss-reader/items.json"
-backup_root="${XDG_STATE_HOME:-${HOME}/.local/state}/omarchy/rss-reader/backups"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+plugin_root="$(cd -- "${script_dir}/.." && pwd)"
+# shellcheck source=database-tools.sh
+source "${script_dir}/database-tools.sh"
 
-if [[ ! -f "${config_file}" && ! -f "${state_file}" ]]; then
+config_file="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy/rss-reader.json"
+state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/omarchy/rss-reader"
+preferences_file="${state_dir}/preferences.json"
+db_file="${state_dir}/items.db"
+legacy_file="${state_dir}/items.json"
+backup_root="${state_dir}/backups"
+
+if [[ ! -f "${config_file}" && ! -f "${preferences_file}" && ! -f "${db_file}" && ! -f "${legacy_file}" ]]; then
   printf '%s\n' "No Feader RSS data to back up."
   exit 0
 fi
 
-backup_dir="${backup_root}/$(date -u +%Y%m%dT%H%M%S%NZ)"
+mkdir -p "${backup_root}"
+
+backup_stamp="$(date -u +%Y%m%dT%H%M%S%NZ)"
+backup_dir="${backup_root}/${backup_stamp}"
 while [[ -e "${backup_dir}" ]]; do
-  backup_dir="${backup_root}/$(date -u +%Y%m%dT%H%M%S%NZ)-${RANDOM}"
+  backup_dir="${backup_root}/${backup_stamp}-${RANDOM}"
 done
-mkdir -p "${backup_dir}"
+
+backup_tmp="$(mktemp -d "${backup_root}/.backup.XXXXXX")"
+cleanup_backup_tmp() {
+  rm -rf -- "${backup_tmp}"
+}
+trap cleanup_backup_tmp EXIT
 
 if [[ -f "${config_file}" ]]; then
-  cp -p "${config_file}" "${backup_dir}/rss-reader.json"
+  cp -p "${config_file}" "${backup_tmp}/rss-reader.json"
 fi
-if [[ -f "${state_file}" ]]; then
-  cp -p "${state_file}" "${backup_dir}/items.json"
+if [[ -f "${preferences_file}" ]]; then
+  cp -p "${preferences_file}" "${backup_tmp}/preferences.json"
+fi
+if [[ -f "${legacy_file}" ]]; then
+  cp -p "${legacy_file}" "${backup_tmp}/items.json"
+fi
+if [[ -f "${db_file}" ]]; then
+  backup_database "${db_file}" "${backup_tmp}/items.db" >/dev/null
 fi
 
+mv -- "${backup_tmp}" "${backup_dir}"
+trap - EXIT
 printf '%s\n' "Backup created at ${backup_dir}"

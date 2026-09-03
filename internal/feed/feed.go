@@ -37,6 +37,8 @@ type Item struct {
 	Categories  []string `json:"categories,omitempty"`
 	Summary     string   `json:"summary"`
 	Read        bool     `json:"read"`
+	Starred     bool     `json:"starred"`
+	Tags        []string `json:"tags,omitempty"`
 	// Cached reports whether the article's full text has already been
 	// prefetched, so the UI can tell readers which articles will open
 	// instantly. It is only populated by store.List, never by feed parsing.
@@ -400,4 +402,41 @@ func Fetch(name, rawURL string) ([]Item, error) {
 	}
 	base, _ := url.Parse(rawURL)
 	return parse(name, data, base)
+}
+
+// FetchWithRetry retries transient network and server failures with an
+// exponential delay. Permanent failures (invalid URLs, unsafe destinations,
+// malformed feeds and oversized responses) are returned immediately.
+func FetchWithRetry(name, rawURL string, attempts int, backoff time.Duration) ([]Item, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if backoff < 0 {
+		backoff = 0
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		items, err := Fetch(name, rawURL)
+		if err == nil {
+			return items, nil
+		}
+		lastErr = err
+		if attempt+1 >= attempts || !safefetch.IsRetryable(err) {
+			break
+		}
+		delay := backoff
+		for n := 0; n < attempt; n++ {
+			if delay >= 5*time.Second {
+				delay = 5 * time.Second
+				break
+			}
+			delay *= 2
+		}
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+		time.Sleep(delay)
+	}
+	return nil, lastErr
 }

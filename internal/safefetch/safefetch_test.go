@@ -1,6 +1,7 @@
 package safefetch
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -76,8 +77,13 @@ func TestGetRejectsMissingHost(t *testing.T) {
 
 func TestCheckResponseRejectsHTTPError(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found"}
-	if err := checkResponse(resp); err == nil {
+	err := checkResponse(resp)
+	if err == nil {
 		t.Fatal("expected non-2xx response to be rejected")
+	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusNotFound {
+		t.Fatalf("error = %T (%v), want HTTPStatusError 404", err, err)
 	}
 }
 
@@ -85,6 +91,21 @@ func TestCheckResponseAllowsSuccess(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Status: "200 OK"}
 	if err := checkResponse(resp); err != nil {
 		t.Fatalf("checkResponse: %v", err)
+	}
+}
+
+func TestIsRetryableDistinguishesTransientAndPermanentFailures(t *testing.T) {
+	if !IsRetryable(&HTTPStatusError{Code: http.StatusBadGateway, Status: "502 Bad Gateway"}) {
+		t.Error("expected 502 to be retryable")
+	}
+	if !IsRetryable(&HTTPStatusError{Code: http.StatusTooManyRequests, Status: "429 Too Many Requests"}) {
+		t.Error("expected 429 to be retryable")
+	}
+	if IsRetryable(&HTTPStatusError{Code: http.StatusNotFound, Status: "404 Not Found"}) {
+		t.Error("did not expect 404 to be retryable")
+	}
+	if IsRetryable(errors.New("invalid RSS: malformed XML")) {
+		t.Error("did not expect malformed feed to be retryable")
 	}
 }
 

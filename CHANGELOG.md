@@ -2,6 +2,27 @@
 
 All notable changes to Feader RSS are documented in this file.
 
+## [Unreleased]
+
+## [0.3.2] - 2026-09-03
+
+### Added
+- Backup and restore now use SQLite's online backup API, preserving the active
+  `items.db` (including committed WAL state) and restoring it over an existing
+  non-empty database.
+- Backups now include UI preferences alongside feed configuration and article
+  state, while retaining compatibility with legacy `items.json` backups.
+- Added sparse refresh intervals (`15 min`, `30 min`, `1 hour`, and `5 hours`)
+  alongside the existing minute intervals.
+- Added SQLite retention, global unread counts, FTS5 search, saved articles,
+  user tags, folder filters, OPML import/export, feed deduplication, and
+  transient fetch retry/backoff.
+
+### Changed
+- Refined the Quickshell reader UI with an unread inbox summary, clearer
+  action affordances, hover feedback on article cards, a retry banner for
+  failed feeds, and a debounced search field with a clear action.
+
 ## [0.3.1] - 2026-08-28
 
 ### Security

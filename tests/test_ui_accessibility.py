@@ -20,7 +20,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("onActivateRequested", PANEL)
 
     def test_primary_actions_are_keyboard_focusable_and_labeled(self):
-        labels = ("Refresh", "Configure feeds", "Mark all read", "Mark all unread", "Close", "All", "Unread", "Read", "1 min", "5 min", "Add feed", "Save feeds", "Cancel", "Remove")
+        labels = ("Refresh", "Configure feeds", "Mark all read", "Mark all unread", "Close", "All", "Unread", "Read", "Saved", "1 min", "5 min", "15 min", "30 min", "1 hour", "5 hours", "Add feed", "Save feeds", "Cancel", "Remove")
         for label in labels:
             self.assertIn(f'text: "{label}"', PANEL)
         self.assertGreaterEqual(PANEL.count("focusable: true"), len(labels))
@@ -28,7 +28,9 @@ class UiAccessibilityContractTests(unittest.TestCase):
     def test_feed_filter_uses_dropdown(self):
         self.assertIn("id: feedFilterDropdown", PANEL)
         self.assertIn('{ value: "", label: "All feeds" }', PANEL)
-        self.assertIn("onChanged: function(value) { root.setSelectedFeed(value) }", PANEL)
+        self.assertIn('return { value: "folder:" + folder, label: "📁 " + folder }', PANEL)
+        self.assertIn('root.setSelectedFolder(selected.substring(7))', PANEL)
+        self.assertIn('root.setSelectedFeed(selected)', PANEL)
 
     def test_feed_inputs_have_placeholders_and_focus_handoff(self):
         self.assertIn('placeholderText: "Feed name (optional)"', PANEL)
@@ -65,10 +67,10 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("lastUpdated", PANEL)
 
     def test_panel_does_not_bundle_default_feeds(self):
-        self.assertIn("feeds: [], maxItems: 200, refreshMinutes: 5,", PANEL)
+        self.assertIn("feeds: [], maxItems: 200, retentionItems: 1000, refreshMinutes: 5,", PANEL)
         self.assertNotIn("lwn.net/headlines/rss", PANEL)
         self.assertNotIn("omarchy.org/feed.xml", PANEL)
-        self.assertIn('feedModel.append({ name: "", url: "" })', PANEL)
+        self.assertIn('feedModel.append({ name: "", url: "", folder: "" })', PANEL)
 
     def test_empty_feed_configuration_does_not_restore_cached_articles(self):
         self.assertIn("if (!config || !Array.isArray(config.feeds) || config.feeds.length === 0)", PANEL)
@@ -129,8 +131,12 @@ class UiAccessibilityContractTests(unittest.TestCase):
         # used to bleed those digits past the slot and over the neighboring
         # bar widget. Unread state is now conveyed via `active` instead.
         self.assertIn('readonly property string label: ""', PANEL)
-        self.assertIn("var minutes = Number(config && config.refreshMinutes)", PANEL)
-        self.assertIn("Math.max(60, Math.min(300, minutes * 60))", PANEL)
+        self.assertIn("readonly property var refreshOptions", PANEL)
+        self.assertIn('{ value: 15, label: "15 min" }', PANEL)
+        self.assertIn('{ value: 30, label: "30 min" }', PANEL)
+        self.assertIn('{ value: 60, label: "1 hour" }', PANEL)
+        self.assertIn('{ value: 300, label: "5 hours" }', PANEL)
+        self.assertIn("return root.normalizeRefreshMinutes(config && config.refreshMinutes) * 60", PANEL)
         self.assertIn('text: panelLoader.item ? panelLoader.item.label : ""', BAR)
         self.assertIn("active: panelLoader.item ? panelLoader.item.unreadCount > 0 : false", BAR)
         self.assertIn("tooltipText: panelLoader.item ? panelLoader.item.unreadSummary", BAR)
@@ -153,6 +159,22 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("text: modelData.read ? \"READ\" : \"UNREAD\"", PANEL)
         self.assertIn('text: "RSS SUMMARY"', PANEL)
         self.assertIn('text: "FULL ARTICLE"', PANEL)
+        self.assertIn('text: root.selectedArticle && root.selectedArticle.starred ? "★ Saved" : "☆ Save"', PANEL)
+        self.assertIn('placeholderText: "Tags, separated by commas"', PANEL)
+
+    def test_reader_ui_exposes_status_and_interaction_feedback(self):
+        self.assertIn("id: inboxSummary", PANEL)
+        self.assertIn('text: String(root.unreadCount)', PANEL)
+        self.assertIn('iconSpinning: root.loading', PANEL)
+        self.assertIn('tooltipText: root.loading ? "Refreshing feeds…" : "Refresh feeds now"', PANEL)
+        self.assertIn("property int searchDebounceMs: 180", PANEL)
+        self.assertIn("id: searchDebounce", PANEL)
+        self.assertIn("function clearSearch()", PANEL)
+        self.assertIn('text: "Clear"', PANEL)
+        self.assertIn("property bool cardHovered: false", PANEL)
+        self.assertIn("onEntered: articleCard.cardHovered = true", PANEL)
+        self.assertIn('text: "Retry"', PANEL)
+        self.assertIn('tooltipText: panelLoader.item ? panelLoader.item.unreadSummary', BAR)
 
     def test_text_and_actions_adapt_to_available_width(self):
         self.assertGreaterEqual(PANEL.count("Flow {"), 6)
@@ -196,9 +218,24 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn('property string searchQuery: ""', PANEL)
         self.assertIn('property string readFilter: "all"', PANEL)
         self.assertIn('property string selectedFeed: ""', PANEL)
+        self.assertIn('property string selectedFolder: ""', PANEL)
         self.assertIn("function articleMatches(article)", PANEL)
         self.assertIn("function setRefreshMinutes(value)", PANEL)
-        self.assertIn("preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedIndex: selectedIndex }", PANEL)
+        self.assertIn("preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedFolder: selectedFolder, selectedIndex: selectedIndex }", PANEL)
+        self.assertIn('readFilter === "starred"', PANEL)
+
+    def test_search_uses_the_backend_full_text_index(self):
+        self.assertIn('[fetchBinary, "search", "--db", dbPath', PANEL)
+        self.assertIn("id: searchProcess", PANEL)
+        self.assertIn("function applySearchArticles(raw)", PANEL)
+        self.assertIn("searchResultsActive = true", PANEL)
+
+    def test_global_unread_counts_are_returned_by_the_backend_snapshot(self):
+        self.assertIn("property int globalUnreadCount: -1", PANEL)
+        self.assertIn("property int globalUnreadFeedCount: -1", PANEL)
+        self.assertIn("function applySnapshotStats(result)", PANEL)
+        self.assertIn('"--retention", String(root.resolvedRetentionItems)', PANEL)
+        self.assertIn('"folder:" + folder', PANEL)
 
     def test_mark_all_actions_require_confirmation(self):
         self.assertIn('onClicked: root.requestConfirm("markAllRead")', PANEL)
@@ -211,7 +248,19 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn('blocked: root.formControlFocused || root.pendingConfirm !== ""', PANEL)
 
     def test_keyboard_shortcuts_are_discoverable(self):
-        self.assertIn("Shortcuts: R refresh · S settings", PANEL)
+        self.assertIn("text: root.shortcutsHint()", PANEL)
+        self.assertIn("function shortcutsHint()", PANEL)
+
+    def test_keyboard_shortcuts_are_customizable(self):
+        self.assertIn("readonly property var defaultShortcuts:", PANEL)
+        self.assertIn("readonly property var resolvedShortcuts:", PANEL)
+        self.assertIn("var overrides = config && config.shortcuts", PANEL)
+        self.assertIn("if (key === shortcuts.refresh) root.refresh()", PANEL)
+        self.assertIn("else if (key === shortcuts.settings) root.openSettings()", PANEL)
+        self.assertIn("if (key === shortcuts.search) searchField.forceActiveFocus()", PANEL)
+        self.assertIn('else if (key === shortcuts.markAllRead) root.requestConfirm("markAllRead")', PANEL)
+        self.assertIn("if (root.detailOpen) root.openArticle(root.selectedArticle)", PANEL)
+        self.assertIn('else if (key === shortcuts.filterAll) root.setReadFilter("all")', PANEL)
 
     def test_feed_errors_are_surfaced_in_the_list_view(self):
         self.assertIn("root.feedErrors.length > 0", PANEL)

@@ -22,6 +22,12 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Validate manifest JSON
         run: python -m json.tool manifest.json >/dev/null
 
@@ -29,7 +35,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Check installer syntax
-        run: bash -n scripts/install.sh
+        run: bash -n scripts/install.sh scripts/backup.sh scripts/restore.sh scripts/database-tools.sh
 
       - name: Check whitespace errors
         run: git diff --check

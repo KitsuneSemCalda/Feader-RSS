@@ -30,7 +30,7 @@ Panel {
   readonly property string fetchBinary: Qt.resolvedUrl("feader-rss-fetch").toString().replace(/^file:\/\//, "")
 
   property var config: ({
-    feeds: [], maxItems: 200, refreshMinutes: 5,
+    feeds: [], maxItems: 200, retentionItems: 1000, refreshMinutes: 5,
     scrollStep: 54, panelGap: Style.gapsOut
   })
   property var articles: []
@@ -53,18 +53,39 @@ Panel {
   property string searchQuery: ""
   property string readFilter: "all"
   property string selectedFeed: ""
+  property string selectedFolder: ""
   property bool preferencesReady: false
   property int refreshMinutesDraft: 5
+  property int retentionItemsDraft: 1000
   property real scrollStepDraft: 54
   property string pendingConfirm: ""
-  readonly property int unreadCount: articles.filter(function(article) { return !article.read }).length
-  readonly property int unreadFeedCount: {
+  property int globalUnreadCount: -1
+  property int globalUnreadFeedCount: -1
+  property bool searchResultsActive: false
+  property string searchProcessQuery: ""
+  property string tagDraft: ""
+  property int searchDebounceMs: 180
+  readonly property var refreshOptions: [
+    { value: 1, label: "1 min" },
+    { value: 2, label: "2 min" },
+    { value: 3, label: "3 min" },
+    { value: 4, label: "4 min" },
+    { value: 5, label: "5 min" },
+    { value: 15, label: "15 min" },
+    { value: 30, label: "30 min" },
+    { value: 60, label: "1 hour" },
+    { value: 300, label: "5 hours" }
+  ]
+  readonly property int localUnreadCount: articles.filter(function(article) { return !article.read }).length
+  readonly property int localUnreadFeedCount: {
     var feeds = {}
     for (var i = 0; i < articles.length; i++) {
       if (!articles[i].read) feeds[String(articles[i].feed || "")] = true
     }
     return Object.keys(feeds).filter(function(feed) { return feed !== "" }).length
   }
+  readonly property int unreadCount: globalUnreadCount >= 0 ? globalUnreadCount : localUnreadCount
+  readonly property int unreadFeedCount: globalUnreadFeedCount >= 0 ? globalUnreadFeedCount : localUnreadFeedCount
   // A single glyph, always — BarIconButton renders `text` as one un-clipped
   // optical glyph sized for its fixed icon slot. Appending the live unread
   // count here (e.g. " 15") used to bleed digits past that slot and
@@ -73,9 +94,15 @@ Panel {
   readonly property string label: ""
   readonly property string unreadSummary: unreadFeedCount + " feeds unread · " + unreadCount + " articles"
   readonly property int refreshSeconds: {
-    var minutes = Number(config && config.refreshMinutes)
-    return isFinite(minutes) && minutes > 0
-      ? Math.max(60, Math.min(300, minutes * 60)) : 300
+    return root.normalizeRefreshMinutes(config && config.refreshMinutes) * 60
+  }
+  readonly property int resolvedRetentionItems: {
+    var value = Math.floor(Number(config && config.retentionItems))
+    return isFinite(value) && value >= 0 ? Math.min(100000, value) : 1000
+  }
+  readonly property int resolvedMaxItems: {
+    var value = Math.floor(Number(config && config.maxItems))
+    return isFinite(value) && value > 0 ? Math.min(100000, value) : 200
   }
   readonly property real resolvedScrollStep: {
     var value = Number(config.scrollStep)
@@ -85,10 +112,62 @@ Panel {
     var value = Number(config.panelGap)
     return (isFinite(value) && value >= 0) ? value : Style.gapsOut
   }
+  // Single-character keys, always lower-cased before matching. Override any
+  // subset via config.shortcuts (e.g. {"markAllRead": "x"}) — unknown action
+  // names are ignored so a typo in the config never breaks the rest.
+  readonly property var defaultShortcuts: ({
+    refresh: "r",
+    settings: "s",
+    search: "/",
+    markAllRead: "a",
+    openArticle: "o",
+    filterAll: "1",
+    filterUnread: "2",
+    filterRead: "3",
+    filterStarred: "4"
+  })
+  readonly property var resolvedShortcuts: {
+    var merged = {}
+    for (var action in root.defaultShortcuts) merged[action] = root.defaultShortcuts[action]
+    var overrides = config && config.shortcuts
+    if (overrides && typeof overrides === "object") {
+      for (var name in overrides) {
+        if (!(name in merged)) continue
+        var key = String(overrides[name] || "").trim().toLowerCase()
+        if (key !== "") merged[name] = key
+      }
+    }
+    return merged
+  }
   readonly property var visibleArticles: articles.filter(function(article) { return articleMatches(article) })
+
+  function shortcutsHint() {
+    var s = root.resolvedShortcuts
+    return "Shortcuts: " + s.refresh.toUpperCase() + " refresh · " + s.settings.toUpperCase() + " settings · "
+      + s.search.toUpperCase() + " search · " + s.markAllRead.toUpperCase() + " mark all read · "
+      + s.openArticle.toUpperCase() + " open · " + s.filterAll + "/" + s.filterUnread + "/" + s.filterRead
+      + "/" + s.filterStarred + " filter · ↑↓ navigate · Enter open"
+  }
 
   function loadJson(raw, fallback) {
     try { return JSON.parse(raw) } catch (error) { return fallback }
+  }
+
+  function normalizeRefreshMinutes(value) {
+    var numeric = Number(value)
+    if (!isFinite(numeric)) return 5
+    for (var i = 0; i < root.refreshOptions.length; i++) {
+      if (root.refreshOptions[i].value === numeric) return numeric
+    }
+    return 5
+  }
+
+  function refreshLabel(value) {
+    var normalized = root.normalizeRefreshMinutes(value)
+    for (var i = 0; i < root.refreshOptions.length; i++) {
+      if (root.refreshOptions[i].value === normalized) return root.refreshOptions[i].label
+    }
+    return "5 min"
   }
 
   function inferFeedName(url) {
@@ -103,6 +182,36 @@ Panel {
     var explicit = String(feed.name || "").trim()
     var url = String(feed.url || "").trim()
     return explicit || root.inferFeedName(url) || url
+  }
+
+  function feedFolderForName(feedName) {
+    if (!config || !Array.isArray(config.feeds)) return ""
+    var target = String(feedName || "")
+    for (var i = 0; i < config.feeds.length; i++) {
+      var feed = config.feeds[i]
+      if (feed && root.feedDisplayName(feed) === target) return String(feed.folder || "").trim()
+    }
+    return ""
+  }
+
+  function configuredFeedNamesArray() {
+    var names = []
+    if (!config || !Array.isArray(config.feeds)) return names
+    for (var i = 0; i < config.feeds.length; i++) {
+      var name = root.feedDisplayName(config.feeds[i])
+      if (name !== "" && names.indexOf(name) < 0) names.push(name)
+    }
+    return names
+  }
+
+  function configuredFolders() {
+    var folders = []
+    if (!config || !Array.isArray(config.feeds)) return folders
+    for (var i = 0; i < config.feeds.length; i++) {
+      var folder = String(config.feeds[i].folder || "").trim()
+      if (folder !== "" && folders.indexOf(folder) < 0) folders.push(folder)
+    }
+    return folders
   }
 
   function formatPublished(value) {
@@ -125,6 +234,11 @@ Panel {
     categories = categories.map(function(category) { return String(category || "").trim() })
       .filter(function(category) { return category !== "" })
     if (categories.length > 0) parts.push(categories.join(", "))
+    var tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : []
+    tags = tags.map(function(tag) { return String(tag || "").trim() })
+      .filter(function(tag) { return tag !== "" })
+    if (article.starred) parts.push("★ saved")
+    if (tags.length > 0) parts.push("#" + tags.join(" #"))
     if (article.cached) parts.push("⚡ ready")
     return parts.join(" · ")
   }
@@ -138,12 +252,13 @@ Panel {
     var value = loadJson(raw, null)
     if (value && Array.isArray(value.feeds)) {
       root.config = value
-      refreshMinutesDraft = Math.max(1, Math.min(5, Number(value.refreshMinutes || 5)))
+      refreshMinutesDraft = root.normalizeRefreshMinutes(value.refreshMinutes || 5)
+      retentionItemsDraft = root.resolvedRetentionItems
       feedModel.clear()
       for (var i = 0; i < value.feeds.length; i++) {
         var feed = value.feeds[i]
         if (feed && feed.url) feedModel.append({
-          name: root.feedDisplayName(feed), url: String(feed.url)
+          name: root.feedDisplayName(feed), url: String(feed.url), folder: String(feed.folder || "")
         })
       }
     }
@@ -155,7 +270,8 @@ Panel {
     detailOpen = false
     selectedArticle = null
     formControlFocused = false
-    refreshMinutesDraft = Math.max(1, Math.min(5, Number(config.refreshMinutes || 5)))
+    refreshMinutesDraft = root.normalizeRefreshMinutes(config.refreshMinutes || 5)
+    retentionItemsDraft = root.resolvedRetentionItems
     scrollStepDraft = root.resolvedScrollStep
   }
 
@@ -176,7 +292,7 @@ Panel {
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
       if (feed && feed.url) feedModel.append({
-        name: root.feedDisplayName(feed), url: String(feed.url)
+        name: root.feedDisplayName(feed), url: String(feed.url), folder: String(feed.folder || "")
       })
     }
   }
@@ -186,7 +302,7 @@ Panel {
       status = "You can configure up to 8 feeds."
       return
     }
-    feedModel.append({ name: "", url: "" })
+    feedModel.append({ name: "", url: "", folder: "" })
   }
 
   function removeFeed(index) {
@@ -216,12 +332,13 @@ Panel {
         return
       }
       seenNames[name.toLowerCase()] = true
-      feeds.push({ name: name, url: url })
+      feeds.push({ name: name, url: url, folder: String(feed.folder || "").trim() })
     }
     root.config = Object.assign({}, root.config, {
       feeds: feeds,
-      maxItems: Number(root.config.maxItems || 200),
-      refreshMinutes: refreshMinutesDraft,
+      maxItems: root.resolvedMaxItems,
+      retentionItems: retentionItemsDraft,
+      refreshMinutes: root.normalizeRefreshMinutes(refreshMinutesDraft),
       scrollStep: scrollStepDraft
     })
     configFile.setText(JSON.stringify(root.config, null, 2) + "\n")
@@ -234,9 +351,10 @@ Panel {
     var value = loadJson(raw, null)
     if (value && value.preferences) {
       searchQuery = String(value.preferences.searchQuery || "")
-      readFilter = ["all", "unread", "read"].indexOf(String(value.preferences.readFilter)) >= 0
+      readFilter = ["all", "unread", "read", "starred"].indexOf(String(value.preferences.readFilter)) >= 0
         ? String(value.preferences.readFilter) : "all"
       selectedFeed = String(value.preferences.selectedFeed || "")
+      selectedFolder = String(value.preferences.selectedFolder || "")
       selectedIndex = Math.max(0, Number(value.preferences.selectedIndex || 0))
     }
     preferencesReady = true
@@ -244,14 +362,15 @@ Panel {
       root.articles = []
       return
     }
-    root.loadInitialArticles()
+    if (searchQuery.trim() !== "") root.requestSearch()
+    else root.loadInitialArticles()
   }
 
   function saveState() {
     stateFile.setText(JSON.stringify({
       version: 2,
       updatedAt: new Date().toISOString(),
-      preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedIndex: selectedIndex }
+      preferences: { searchQuery: searchQuery, readFilter: readFilter, selectedFeed: selectedFeed, selectedFolder: selectedFolder, selectedIndex: selectedIndex }
     }, null, 2) + "\n")
   }
 
@@ -259,9 +378,12 @@ Panel {
     if (!article) return false
     if (readFilter === "unread" && article.read) return false
     if (readFilter === "read" && !article.read) return false
+    if (readFilter === "starred" && !article.starred) return false
     if (selectedFeed !== "" && String(article.feed || "") !== selectedFeed) return false
+    if (selectedFolder !== "" && root.feedFolderForName(article.feed) !== selectedFolder) return false
     var query = searchQuery.trim().toLowerCase()
     if (query === "") return true
+    if (searchResultsActive) return true
     return (String(article.title || "") + " " + String(article.summary || "") + " "
       + String(article.feed || "") + " " + String(article.author || "") + " "
       + (Array.isArray(article.categories) ? article.categories.join(" ") : ""))
@@ -276,18 +398,40 @@ Panel {
 
   function setSelectedFeed(value) {
     selectedFeed = value
+    selectedFolder = ""
+    selectedIndex = 0
+    if (preferencesReady) saveState()
+  }
+
+  function setSelectedFolder(value) {
+    selectedFolder = value
+    selectedFeed = ""
     selectedIndex = 0
     if (preferencesReady) saveState()
   }
 
   function setSearchQuery(value) {
-    searchQuery = value
+    searchQuery = String(value || "")
     selectedIndex = 0
-    if (preferencesReady) saveState()
+    searchResultsActive = false
+    if (preferencesReady) {
+      saveState()
+      searchDebounce.restart()
+    }
+  }
+
+  function clearSearch() {
+    searchField.text = ""
+    searchField.forceActiveFocus()
   }
 
   function setRefreshMinutes(value) {
-    refreshMinutesDraft = Math.max(1, Math.min(5, Number(value)))
+    refreshMinutesDraft = root.normalizeRefreshMinutes(value)
+  }
+
+  function setRetentionItems(value) {
+    var numeric = Math.floor(Number(value))
+    retentionItemsDraft = isFinite(numeric) && numeric >= 0 ? Math.min(100000, numeric) : 1000
   }
 
   function setScrollStep(value) {
@@ -325,7 +469,9 @@ Panel {
     if (fetchProcess.running || !config || !Array.isArray(config.feeds) || !config.feeds.length) return
     loading = true
     status = "Refreshing…"
-    var command = [fetchBinary, "fetch", "--db", dbPath, "--limit", String(config.maxItems || 200)]
+    var command = [fetchBinary, "fetch", "--db", dbPath,
+      "--limit", String(root.resolvedMaxItems),
+      "--retention", String(root.resolvedRetentionItems)]
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
       if (feed && feed.url) command.push(root.feedDisplayName(feed), String(feed.url))
@@ -335,8 +481,40 @@ Panel {
   }
 
   function loadInitialArticles() {
-    listProcess.command = [fetchBinary, "list", "--db", dbPath, "--limit", String(config.maxItems || 200)]
+    if (listProcess.running) return
+    var command = [fetchBinary, "list", "--db", dbPath, "--limit", String(root.resolvedMaxItems)]
+    var names = root.configuredFeedNamesArray()
+    for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
+    listProcess.command = command
     listProcess.running = true
+  }
+
+  function applySnapshotStats(result) {
+    if (!result || !isFinite(Number(result.unreadCount)) || !isFinite(Number(result.unreadFeedCount))) {
+      globalUnreadCount = -1
+      globalUnreadFeedCount = -1
+      return
+    }
+    globalUnreadCount = Math.max(0, Number(result.unreadCount))
+    globalUnreadFeedCount = Math.max(0, Number(result.unreadFeedCount))
+  }
+
+  function requestSearch() {
+    searchDebounce.stop()
+    if (!preferencesReady) return
+    if (searchQuery.trim() === "") {
+      searchResultsActive = false
+      root.loadInitialArticles()
+      return
+    }
+    if (searchProcess.running) return
+    searchProcessQuery = searchQuery
+    var command = [fetchBinary, "search", "--db", dbPath,
+      "--query", searchProcessQuery, "--limit", String(root.resolvedMaxItems)]
+    var names = root.configuredFeedNamesArray()
+    for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
+    searchProcess.command = command
+    searchProcess.running = true
   }
 
   function configuredFeedNames() {
@@ -364,6 +542,8 @@ Panel {
       loading = false; status = "Could not refresh feeds"; return
     }
     feedErrors = Array.isArray(result.errors) ? result.errors : []
+    root.applySnapshotStats(result)
+    searchResultsActive = false
     root.articles = filterToConfiguredFeeds(result.items)
     selectedIndex = Math.min(selectedIndex, Math.max(0, visibleArticles.length - 1))
     root.notifyNewPosts(Array.isArray(result.newItems) ? result.newItems : [])
@@ -374,6 +554,7 @@ Panel {
       : lastUpdated
     root.prefetchArticles()
     root.updateUnreadNotification()
+    if (searchQuery.trim() !== "") root.requestSearch()
   }
 
   function prefetchArticles() {
@@ -397,8 +578,28 @@ Panel {
   function applyInitialArticles(raw) {
     var result = loadJson(raw, null)
     var items = (result && Array.isArray(result.items)) ? result.items : []
+    root.applySnapshotStats(result)
+    if (searchQuery.trim() !== "") {
+      root.requestSearch()
+      return
+    }
+    searchResultsActive = false
     root.articles = filterToConfiguredFeeds(items)
     root.prefetchArticles()
+    root.updateUnreadNotification()
+  }
+
+  function applySearchArticles(raw) {
+    var result = loadJson(raw, null)
+    if (searchProcessQuery !== searchQuery) {
+      searchDebounce.restart()
+      return
+    }
+    root.applySnapshotStats(result)
+    var items = (result && Array.isArray(result.items)) ? result.items : []
+    searchResultsActive = true
+    root.articles = filterToConfiguredFeeds(items)
+    selectedIndex = Math.min(selectedIndex, Math.max(0, visibleArticles.length - 1))
     root.updateUnreadNotification()
   }
 
@@ -482,6 +683,7 @@ Panel {
     var updated = Object.assign({}, next[index], { read: true })
     next[index] = updated
     articles = next
+    if (globalUnreadCount >= 0) globalUnreadCount = Math.max(0, globalUnreadCount - 1)
     persistMarkRead(updated.id)
     root.updateUnreadNotification()
     return updated
@@ -494,15 +696,78 @@ Panel {
   function markAllRead() {
     var next = articles.map(function(article) { return Object.assign({}, article, { read: true }) })
     articles = next
-    Quickshell.execDetached([fetchBinary, "mark-all", "--db", dbPath])
+    var command = [fetchBinary, "mark-all", "--db", dbPath]
+    var names = root.configuredFeedNamesArray()
+    for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
+    Quickshell.execDetached(command)
+    globalUnreadCount = 0
+    globalUnreadFeedCount = 0
     root.updateUnreadNotification()
   }
 
   function markAllUnread() {
     var next = articles.map(function(article) { return Object.assign({}, article, { read: false }) })
     articles = next
-    Quickshell.execDetached([fetchBinary, "mark-all", "--db", dbPath, "--unread"])
+    var command = [fetchBinary, "mark-all", "--db", dbPath, "--unread"]
+    var names = root.configuredFeedNamesArray()
+    for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
+    Quickshell.execDetached(command)
+    // The database may contain more articles than the current page. Let the
+    // next list/refresh response provide the exact global count instead of
+    // pretending that the visible subset is the whole store.
+    globalUnreadCount = -1
+    globalUnreadFeedCount = -1
     root.updateUnreadNotification()
+    root.loadInitialArticles()
+  }
+
+  function toggleStar(article) {
+    if (!article || !article.id) return
+    var articleId = String(article.id)
+    var starred = !article.starred
+    var next = articles.slice()
+    for (var i = 0; i < next.length; i++) {
+      if (String(next[i].id || "") === articleId) {
+        next[i] = Object.assign({}, next[i], { starred: starred })
+        break
+      }
+    }
+    articles = next
+    if (selectedArticle && String(selectedArticle.id || "") === articleId)
+      selectedArticle = Object.assign({}, selectedArticle, { starred: starred })
+    Quickshell.execDetached([fetchBinary, "star", "--db", dbPath, "--value", starred ? "true" : "false", articleId])
+  }
+
+  function parseTags(value) {
+    var tags = []
+    var seen = {}
+    var values = String(value || "").split(",")
+    for (var i = 0; i < values.length; i++) {
+      var tag = values[i].trim()
+      var key = tag.toLowerCase()
+      if (tag !== "" && !seen[key]) {
+        seen[key] = true
+        tags.push(tag)
+      }
+    }
+    return tags
+  }
+
+  function saveArticleTags() {
+    if (!selectedArticle || !selectedArticle.id) return
+    var tags = root.parseTags(tagDraft)
+    var articleId = String(selectedArticle.id)
+    var next = articles.slice()
+    for (var i = 0; i < next.length; i++) {
+      if (String(next[i].id || "") === articleId) {
+        next[i] = Object.assign({}, next[i], { tags: tags })
+        break
+      }
+    }
+    articles = next
+    selectedArticle = Object.assign({}, selectedArticle, { tags: tags })
+    tagDraft = tags.join(", ")
+    Quickshell.execDetached([fetchBinary, "set-tags", "--db", dbPath, "--tags", tags.join(","), articleId])
   }
 
   function requestConfirm(action) { pendingConfirm = action }
@@ -539,6 +804,7 @@ Panel {
     if (!article) return
     var openedArticle = markRead(article)
     selectedArticle = openedArticle
+    tagDraft = Array.isArray(openedArticle.tags) ? openedArticle.tags.join(", ") : ""
     detailOpen = true
     loadArticle(openedArticle)
   }
@@ -611,7 +877,12 @@ Panel {
     atomicWrites: true
     printErrors: false
     onLoaded: { root.loadState(text()); root.stateReady = true }
-    onLoadFailed: { root.preferencesReady = true; root.stateReady = true; root.loadInitialArticles() }
+    onLoadFailed: {
+      root.preferencesReady = true
+      root.stateReady = true
+      if (root.searchQuery.trim() !== "") root.requestSearch()
+      else root.loadInitialArticles()
+    }
     onFileChanged: reload()
   }
 
@@ -644,6 +915,29 @@ Panel {
       waitForEnd: true
       onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
     }
+  }
+
+  Process {
+    id: searchProcess
+    onExited: {
+      running = false
+      if (root.searchQuery !== root.searchProcessQuery) searchDebounce.restart()
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applySearchArticles(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
+    }
+  }
+
+  Timer {
+    id: searchDebounce
+    interval: root.searchDebounceMs
+    repeat: false
+    onTriggered: root.requestSearch()
   }
 
   Process {
@@ -736,8 +1030,21 @@ Panel {
         else if (root.visibleArticles.length) root.showArticle(root.visibleArticles[root.selectedIndex])
       }
       onTextKey: function(text) {
-        if (text === "r" || text === "R") root.refresh()
-        else if (text === "s" || text === "S") root.openSettings()
+        var key = String(text || "").toLowerCase()
+        var shortcuts = root.resolvedShortcuts
+        if (key === shortcuts.refresh) root.refresh()
+        else if (key === shortcuts.settings) root.openSettings()
+        else if (key === shortcuts.openArticle) {
+          if (root.detailOpen) root.openArticle(root.selectedArticle)
+          else if (root.visibleArticles.length) root.openArticle(root.visibleArticles[root.selectedIndex])
+        } else if (!root.settingsOpen && !root.detailOpen) {
+          if (key === shortcuts.search) searchField.forceActiveFocus()
+          else if (key === shortcuts.markAllRead) root.requestConfirm("markAllRead")
+          else if (key === shortcuts.filterAll) root.setReadFilter("all")
+          else if (key === shortcuts.filterUnread) root.setReadFilter("unread")
+          else if (key === shortcuts.filterRead) root.setReadFilter("read")
+          else if (key === shortcuts.filterStarred) root.setReadFilter("starred")
+        }
       }
     }
 
@@ -805,6 +1112,78 @@ Panel {
         width: parent.width
       }
 
+      BorderSurface {
+        id: inboxSummary
+        visible: !root.detailOpen && !root.settingsOpen && root.config.feeds.length > 0
+        width: parent.width
+        height: inboxSummaryContent.y + inboxSummaryContent.implicitHeight + Style.space(10)
+        color: root.unreadCount > 0
+          ? Style.selectedFillFor(root.foreground, Color.accent)
+          : Style.normalFillFor(root.foreground, Color.accent)
+        borderSpec: root.unreadCount > 0
+          ? Border.controlSpec("selected", root.foreground, Color.accent)
+          : Border.controlSpec("normal", root.foreground, Color.accent)
+        radius: Style.cornerRadius
+
+        Column {
+          id: inboxSummaryContent
+          x: Style.space(10)
+          y: Style.space(10)
+          width: parent.width - Style.space(20)
+          spacing: Style.space(4)
+
+          Row {
+            width: parent.width
+            spacing: Style.space(10)
+
+            Text {
+              text: String(root.unreadCount)
+              color: root.unreadCount > 0 ? Color.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+              font.bold: true
+              verticalAlignment: Text.AlignVCenter
+            }
+
+            Column {
+              width: Math.max(0, parent.width - Style.space(64))
+              spacing: Style.space(1)
+              Text {
+                text: "UNREAD"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+              Text {
+                text: root.unreadFeedCount === 1 ? "1 feed needs attention" : root.unreadFeedCount + " feeds need attention"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+                width: parent.width
+              }
+            }
+          }
+
+          Text {
+            text: root.unreadCount + " unread · " + root.unreadFeedCount + " feeds"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+          Text {
+            text: root.searchProcess.running ? "Searching saved articles…"
+              : (root.unreadCount === 0 ? "All caught up" : "Open an article to mark it read")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+        }
+      }
+
       Flow {
         visible: !root.detailOpen && !root.settingsOpen
         spacing: Style.space(8)
@@ -812,6 +1191,9 @@ Panel {
         Button {
           id: refreshButton
           text: "Refresh"
+          iconText: "↻"
+          iconSpinning: root.loading
+          tooltipText: root.loading ? "Refreshing feeds…" : "Refresh feeds now"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -820,6 +1202,8 @@ Panel {
         Button {
           id: configureButton
           text: "Configure feeds"
+          iconText: "⚙"
+          tooltipText: "Manage feeds and reader settings"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -828,6 +1212,8 @@ Panel {
         Button {
           id: closeButton
           text: "Close"
+          iconText: "×"
+          tooltipText: "Close Feader RSS"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -841,6 +1227,8 @@ Panel {
         width: parent.width
         Button {
           text: "Mark all read"
+          iconText: "✓"
+          tooltipText: "Mark every configured article as read"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -848,6 +1236,8 @@ Panel {
         }
         Button {
           text: "Mark all unread"
+          iconText: "↺"
+          tooltipText: "Mark every configured article as unread"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -857,7 +1247,7 @@ Panel {
 
       Text {
         visible: !root.detailOpen && !root.settingsOpen
-        text: "Shortcuts: R refresh · S settings · ↑↓ navigate · Enter open"
+        text: root.shortcutsHint()
         color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap; width: parent.width
       }
@@ -867,54 +1257,104 @@ Panel {
         width: parent.width
         spacing: Style.space(8)
         Text {
-          text: root.articles.length + " saved articles"
+          text: root.visibleArticles.length + (root.visibleArticles.length === 1 ? " article" : " articles")
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+          visible: root.searchResultsActive
+          text: "matching your search"
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
         }
       }
 
-      Column {
+      BorderSurface {
+        id: feedErrorSurface
         visible: !root.detailOpen && !root.settingsOpen && root.feedErrors.length > 0
         width: parent.width
-        spacing: Style.space(2)
-        Repeater {
-          model: root.feedErrors
-          delegate: Text {
-            required property var modelData
+        height: feedErrorContent.y + feedErrorContent.implicitHeight + Style.space(10)
+        color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.08)
+        borderSpec: Border.controlSpec("normal", root.foreground, Color.urgent)
+        radius: Style.cornerRadius
+
+        Column {
+          id: feedErrorContent
+          x: Style.space(10)
+          y: Style.space(10)
+          width: parent.width - Style.space(20)
+          spacing: Style.space(4)
+
+          Flow {
             width: parent.width
-            text: "⚠ " + String(modelData.name || modelData.feed || modelData.url || "Feed")
-              + ": " + String(modelData.error || modelData.message || "failed to refresh")
-            color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
+            spacing: Style.space(8)
+            Text {
+              width: Math.max(0, parent.width - retryButton.implicitWidth - parent.spacing)
+              text: "Some feeds need attention"
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+            Button {
+              id: retryButton
+              text: "Retry"
+              iconText: "↻"
+              tooltipText: "Retry failed feeds"
+              foreground: root.foreground
+              focusable: true
+              onActiveFocusChanged: root.formControlFocused = activeFocus
+              onClicked: root.refresh()
+            }
+          }
+
+          Repeater {
+            model: root.feedErrors
+            delegate: Text {
+              required property var modelData
+              width: parent.width
+              text: "⚠ " + String(modelData.name || modelData.feed || modelData.url || "Feed")
+                + ": " + String(modelData.error || modelData.message || "failed to refresh")
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+            }
           }
         }
       }
 
-      Text {
-        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
-        text: root.unreadCount + " unread · " + root.unreadFeedCount + " feeds"
-        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
-      }
-
-      Text {
-        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
-        text: root.unreadCount === 0 ? "All articles read" : "Unread articles"
-        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
-      }
-
-      TextField {
-        id: searchField
-        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
+      Flow {
+        id: searchRow
+        visible: !root.detailOpen && !root.settingsOpen && root.config.feeds.length > 0
         width: parent.width
-        foreground: root.foreground
-        placeholderText: "Search title, summary, author or category"
-        onTextChanged: root.setSearchQuery(text)
-        onActiveFocusChanged: root.formControlFocused = activeFocus
-        Component.onCompleted: text = root.searchQuery
+        spacing: Style.space(6)
+        TextField {
+          id: searchField
+          width: root.searchQuery !== ""
+            ? Math.max(0, searchRow.width - clearSearchButton.implicitWidth - searchRow.spacing)
+            : searchRow.width
+          foreground: root.foreground
+          placeholderText: "Search title, summary, full text, tags or author"
+          onTextChanged: root.setSearchQuery(text)
+          onActiveFocusChanged: root.formControlFocused = activeFocus
+          Component.onCompleted: text = root.searchQuery
+        }
+        Button {
+          id: clearSearchButton
+          visible: root.searchQuery !== ""
+          text: "Clear"
+          iconText: "×"
+          tooltipText: "Clear search"
+          foreground: root.foreground
+          focusable: true
+          onActiveFocusChanged: root.formControlFocused = activeFocus
+          onClicked: root.clearSearch()
+        }
       }
 
       Flow {
-        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
+        visible: !root.detailOpen && !root.settingsOpen && root.config.feeds.length > 0
         spacing: Style.space(6)
         width: parent.width
         Button {
@@ -941,22 +1381,37 @@ Panel {
           onActiveFocusChanged: root.formControlFocused = activeFocus
           onClicked: root.setReadFilter("read")
         }
+        Button {
+          text: "Saved"
+          selected: root.readFilter === "starred"
+          foreground: root.foreground
+          focusable: true
+          onActiveFocusChanged: root.formControlFocused = activeFocus
+          onClicked: root.setReadFilter("starred")
+        }
       }
 
       Dropdown {
         id: feedFilterDropdown
-        visible: !root.detailOpen && !root.settingsOpen && root.articles.length > 0
+        visible: !root.detailOpen && !root.settingsOpen && root.config.feeds.length > 0
         width: parent.width
         showLabel: false
         foreground: root.foreground
-        value: root.selectedFeed
+        value: root.selectedFolder !== "" ? "folder:" + root.selectedFolder : root.selectedFeed
         options: [{ value: "", label: "All feeds" }].concat(
+          root.configuredFolders().map(function(folder) {
+            return { value: "folder:" + folder, label: "📁 " + folder }
+          })).concat(
           root.config.feeds.map(function(feed) {
             var v = root.feedDisplayName(feed)
             return { value: v, label: v }
           }))
         onHovered: function(isHovered) {}
-        onChanged: function(value) { root.setSelectedFeed(value) }
+        onChanged: function(value) {
+          var selected = String(value || "")
+          if (selected.indexOf("folder:") === 0) root.setSelectedFolder(selected.substring(7))
+          else root.setSelectedFeed(selected)
+        }
         onActiveFocusChanged: root.formControlFocused = activeFocus
       }
 
@@ -986,6 +1441,8 @@ Panel {
         width: parent.width
         Button {
           text: "Back"
+          iconText: "←"
+          tooltipText: "Back to article list"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -993,6 +1450,8 @@ Panel {
         }
         Button {
           text: "Open in browser"
+          iconText: "↗"
+          tooltipText: "Open this article in the browser"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -1000,6 +1459,8 @@ Panel {
         }
         Button {
           text: "Close"
+          iconText: "×"
+          tooltipText: "Close article"
           foreground: root.foreground
           focusable: true
           onActiveFocusChanged: root.formControlFocused = activeFocus
@@ -1034,6 +1495,39 @@ Panel {
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
           textFormat: Text.PlainText
+        }
+        Flow {
+          width: parent.width
+          spacing: Style.space(6)
+          Button {
+            text: root.selectedArticle && root.selectedArticle.starred ? "★ Saved" : "☆ Save"
+            tooltipText: root.selectedArticle && root.selectedArticle.starred
+              ? "Remove from saved articles" : "Save this article"
+            foreground: root.foreground
+            selected: root.selectedArticle && root.selectedArticle.starred
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.toggleStar(root.selectedArticle)
+          }
+          TextField {
+            id: tagsField
+            width: Math.max(0, parent.width - saveTagsButton.implicitWidth - parent.spacing)
+            text: root.tagDraft
+            foreground: root.foreground
+            placeholderText: "Tags, separated by commas"
+            onTextChanged: if (activeFocus) root.tagDraft = text
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+          }
+          Button {
+            id: saveTagsButton
+            text: "Save tags"
+            iconText: "✓"
+            tooltipText: "Save tags for this article"
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.saveArticleTags()
+          }
         }
         Text {
           visible: root.selectedArticle && String(root.selectedArticle.summary || "") !== ""
@@ -1083,21 +1577,29 @@ Panel {
         visible: !root.detailOpen && !root.settingsOpen
         width: parent.width
         spacing: Style.space(6)
-        Repeater {
-          id: articleRepeater
-          model: root.visibleArticles
-          delegate: BorderSurface {
+          Repeater {
+            id: articleRepeater
+            model: root.visibleArticles
+            delegate: BorderSurface {
+            id: articleCard
             required property var modelData
             required property int index
+            property bool cardHovered: false
             width: column.width
             height: badges.implicitHeight + title.implicitHeight + meta.implicitHeight + summary.implicitHeight + Style.space(27)
             color: index === root.selectedIndex
               ? Style.selectedFillFor(root.foreground, Color.accent)
-              : Style.normalFillFor(root.foreground, Color.accent)
+              : (cardHovered
+                ? Style.hoverFillFor(root.foreground, Color.accent)
+                : Style.normalFillFor(root.foreground, Color.accent))
             radius: Style.cornerRadius
             borderSpec: index === root.selectedIndex
               ? Border.controlSpec("selected", root.foreground, Color.accent)
-              : Border.none()
+              : (cardHovered
+                ? Border.controlSpec("hover-cursor", root.foreground, Color.accent)
+                : Border.none())
+
+            Behavior on color { ColorAnimation { duration: 120 } }
 
             Column {
               anchors.fill: parent; anchors.margins: Style.space(9); spacing: Style.space(3)
@@ -1115,12 +1617,33 @@ Panel {
                   text: "⚡ READY"
                   color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                 }
+                Text {
+                  visible: modelData.starred
+                  text: "★ SAVED"
+                  color: Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
               }
               Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
               Text { id: meta; width: parent.width; text: root.articleMeta(modelData); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
               Text { id: summary; width: parent.width; text: root.articleSummary(modelData); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
             }
-            MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = index; root.showArticle(modelData) } }
+            Rectangle {
+              visible: !modelData.read
+              x: articleCard.borderLeft
+              y: articleCard.borderTop
+              width: Style.space(3)
+              height: Math.max(0, articleCard.height - articleCard.borderTop - articleCard.borderBottom)
+              color: Color.accent
+              radius: Style.cornerRadius
+            }
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onEntered: articleCard.cardHovered = true
+              onExited: articleCard.cardHovered = false
+              onClicked: { root.selectedIndex = index; root.showArticle(modelData) }
+            }
           }
         }
       }
@@ -1148,7 +1671,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Feeds refresh automatically between 1 and 5 minutes."
+          text: "Choose a compact interval for active feeds or a sparse interval to reduce network traffic."
           color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
         }
@@ -1177,9 +1700,64 @@ Panel {
             onActiveFocusChanged: root.formControlFocused = activeFocus
             onClicked: root.setRefreshMinutes(5)
           }
+          Button {
+            text: "15 min"
+            selected: root.refreshMinutesDraft === 15
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setRefreshMinutes(15)
+          }
+          Button {
+            text: "30 min"
+            selected: root.refreshMinutesDraft === 30
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setRefreshMinutes(30)
+          }
+          Button {
+            text: "1 hour"
+            selected: root.refreshMinutesDraft === 60
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setRefreshMinutes(60)
+          }
+          Button {
+            text: "5 hours"
+            selected: root.refreshMinutesDraft === 300
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: root.setRefreshMinutes(300)
+          }
         }
 
         PanelSeparator { foreground: root.foreground }
+
+        PanelSectionHeader {
+          text: "ARTICLE RETENTION"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Text {
+          width: parent.width
+          text: "Keep the newest articles locally. Read and unsaved articles are removed first; 0 keeps everything."
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        TextField {
+          width: parent.width
+          text: String(root.retentionItemsDraft)
+          foreground: root.foreground
+          placeholderText: "Stored articles (0 = unlimited)"
+          inputMethodHints: Qt.ImhDigitsOnly
+          onTextChanged: if (activeFocus) root.setRetentionItems(text)
+          onActiveFocusChanged: root.formControlFocused = activeFocus
+        }
 
         PanelSectionHeader {
           text: "SCROLL SPEED"
@@ -1243,7 +1821,7 @@ Panel {
           width: parent.width
           text: feedModel.count === 0
             ? "No feeds configured yet. Add one to start reading."
-            : "Give each feed a name, or leave it blank to use the site name."
+            : "Give each feed a name and optional folder, or leave them blank to use defaults."
           color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
         }
@@ -1271,6 +1849,7 @@ Panel {
               required property int index
               required property string name
               required property string url
+              required property string folder
               width: feedList.width
               height: feedCard.implicitHeight + Style.space(18)
               color: Style.normalFillFor(root.foreground, Color.accent)
@@ -1337,6 +1916,15 @@ Panel {
                     onTextChanged: if (activeFocus) feedModel.setProperty(index, "url", text)
                     onActiveFocusChanged: root.formControlFocused = activeFocus
                   }
+                }
+
+                TextField {
+                  width: parent.width
+                  text: folder
+                  foreground: root.foreground
+                  placeholderText: "Folder (optional)"
+                  onTextChanged: if (activeFocus) feedModel.setProperty(index, "folder", text)
+                  onActiveFocusChanged: root.formControlFocused = activeFocus
                 }
               }
             }

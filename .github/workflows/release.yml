@@ -18,6 +18,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -27,13 +33,7 @@ jobs:
         run: |
           python -m json.tool manifest.json >/dev/null
           python -m unittest discover -s tests -v
-          bash -n scripts/install.sh
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+          bash -n scripts/install.sh scripts/backup.sh scripts/restore.sh scripts/database-tools.sh
 
       - name: Test Go backend
         run: go test -race ./...
