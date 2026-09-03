@@ -4,6 +4,14 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-02
+
+### Added
+- Added behavioral coverage for the CLI commands, including fetch, search,
+  article caching, prefetch, migration, backup/restore, OPML, and mutations.
+- Added edge-case coverage for parsers, safe networking, retry/backoff,
+  SQLite retention and migration, and OPML serialization.
+
 ### Changed
 - Renamed `TODO-go-migration.md` to `TODO.md` as the ongoing project roadmap.
 
