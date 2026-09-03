@@ -51,6 +51,14 @@ type snapshot struct {
 
 type stringList []string
 
+// Keep the network boundaries replaceable in tests. The production defaults
+// remain the concrete fetchers used by the CLI.
+var (
+	fetchFeedWithRetry    = feed.FetchWithRetry
+	fetchArticle          = article.Fetch
+	fetchArticleWithRetry = article.FetchWithRetry
+)
+
 func (s *stringList) String() string { return strings.Join(*s, ",") }
 
 func (s *stringList) Set(value string) error {
@@ -334,7 +342,7 @@ func cmdFetch(args []string) int {
 	for i := 0; i+1 < len(feedArgs); i += 2 {
 		name, url := feedArgs[i], feedArgs[i+1]
 		feedNames = append(feedNames, name)
-		items, err := feed.FetchWithRetry(name, url, *attempts, *backoff)
+		items, err := fetchFeedWithRetry(name, url, *attempts, *backoff)
 		if err != nil {
 			errs = append(errs, feedError{Feed: name, URL: url, Error: err.Error()})
 			fmt.Fprintf(os.Stderr, "%s: %s\n", name, err)
@@ -481,7 +489,7 @@ func cmdArticle(args []string) int {
 		}
 	}
 
-	result, err := article.Fetch(url)
+	result, err := fetchArticle(url)
 	if err != nil {
 		printJSON(map[string]string{"error": err.Error(), "url": url})
 		return 1
@@ -535,7 +543,7 @@ func cmdPrefetch(args []string) int {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			result, err := article.FetchWithRetry(item.URL, 3, 500*time.Millisecond)
+			result, err := fetchArticleWithRetry(item.URL, 3, 500*time.Millisecond)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "prefetch %s: %s\n", item.URL, err)
 				mu.Lock()
