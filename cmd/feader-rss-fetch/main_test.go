@@ -512,3 +512,105 @@ func TestCLIUtilityErrorAndNilBranches(t *testing.T) {
 		t.Fatal("makeSnapshot should report a closed database")
 	}
 }
+
+func blockingCLIPath(t *testing.T) string {
+	t.Helper()
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("blocking parent"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	return filepath.Join(parent, "state.db")
+}
+
+func TestCLIOperationalErrorPaths(t *testing.T) {
+	blockedDBCommands := [][]string{
+		{"fetch", "--db", blockingCLIPath(t)},
+		{"list", "--db", blockingCLIPath(t)},
+		{"search", "--db", blockingCLIPath(t), "--query", "term"},
+		{"prefetch", "--db", blockingCLIPath(t)},
+		{"mark-read", "--db", blockingCLIPath(t), "id"},
+		{"mark-all", "--db", blockingCLIPath(t)},
+		{"star", "--db", blockingCLIPath(t), "id"},
+		{"set-tags", "--db", blockingCLIPath(t), "id"},
+	}
+	for _, args := range blockedDBCommands {
+		_, stderr, code := captureCLI(t, func() int { return run(args) })
+		if code != 1 || stderr == "" {
+			t.Errorf("blocked database %v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+
+	validConfig := writeCLIFile(t, "valid-config.json", `{"feeds":[]}`)
+	_, stderr, code := captureCLI(t, func() int {
+		return run([]string{"opml-export", "--config", filepath.Join(t.TempDir(), "missing.json")})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("missing OPML export config: code=%d stderr=%q", code, stderr)
+	}
+	blockedOutputParent := filepath.Join(t.TempDir(), "output-parent")
+	if err := os.WriteFile(blockedOutputParent, []byte("blocking parent"), 0o600); err != nil {
+		t.Fatalf("write OPML output parent: %v", err)
+	}
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-export", "--config", validConfig, "--output", filepath.Join(blockedOutputParent, "subscriptions.opml")})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("unwritable OPML export output: code=%d stderr=%q", code, stderr)
+	}
+
+	validOPML := writeCLIFile(t, "valid.opml", `<?xml version="1.0"?><opml version="2.0"><body><outline text="Feed" xmlUrl="https://example.test/feed"/></body></opml>`)
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", validConfig, "--input", filepath.Join(t.TempDir(), "missing.opml")})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("missing OPML input: code=%d stderr=%q", code, stderr)
+	}
+	invalidFeedsConfig := writeCLIFile(t, "invalid-feeds-config.json", `{"feeds":"not an array"}`)
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", invalidFeedsConfig, "--input", validOPML})
+	})
+	if code != 1 || !strings.Contains(stderr, "invalid feeds configuration") {
+		t.Fatalf("invalid feeds config: code=%d stderr=%q", code, stderr)
+	}
+	blockedConfigParent := filepath.Join(t.TempDir(), "config-parent")
+	if err := os.WriteFile(blockedConfigParent, []byte("blocking parent"), 0o600); err != nil {
+		t.Fatalf("write config parent: %v", err)
+	}
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", filepath.Join(blockedConfigParent, "config.json"), "--input", validOPML})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("unwritable OPML import config: code=%d stderr=%q", code, stderr)
+	}
+
+	if _, _, err := readConfigForOPML(t.TempDir()); err == nil {
+		t.Fatal("reading a directory as config should fail")
+	}
+	existingConfigDir := filepath.Join(t.TempDir(), "existing-directory")
+	if err := os.MkdirAll(existingConfigDir, 0o755); err != nil {
+		t.Fatalf("create existing config directory: %v", err)
+	}
+	if err := writeJSONConfig(existingConfigDir, map[string]json.RawMessage{}); err == nil {
+		t.Fatal("writing JSON config over a directory should fail")
+	}
+
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"restore", "--db", filepath.Join(t.TempDir(), "target.db"), "--input", filepath.Join(t.TempDir(), "missing.db")})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("invalid restore source: code=%d stderr=%q", code, stderr)
+	}
+	legacy := writeCLIFile(t, "legacy.json", `{"items":[]}`)
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"migrate", "--db", blockingCLIPath(t), "--json", legacy})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("blocked migration database: code=%d stderr=%q", code, stderr)
+	}
+	_, stderr, code = captureCLI(t, func() int {
+		return run([]string{"migrate", "--db", filepath.Join(t.TempDir(), "db.db"), "--json", filepath.Join(t.TempDir(), "missing.json")})
+	})
+	if code != 1 || stderr == "" {
+		t.Fatalf("missing migration JSON: code=%d stderr=%q", code, stderr)
+	}
+}
