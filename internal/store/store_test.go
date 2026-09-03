@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/KitsuneSemCalda/feader-rss/internal/feed"
@@ -722,5 +724,322 @@ func TestPrunePrefersReadAndUnstarredItems(t *testing.T) {
 	}
 	if _, ok := byID["new-unread"]; !ok {
 		t.Fatal("unread article should survive pruning")
+	}
+}
+
+func TestOpenHandlesInvalidPathsEmptyLegacyStateAndBackfillsDates(t *testing.T) {
+	blockingPath := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blockingPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocking path: %v", err)
+	}
+	if _, err := Open(filepath.Join(blockingPath, "state.db")); err == nil {
+		t.Fatal("Open should fail when the state directory is a regular file")
+	}
+	databaseDirectory := filepath.Join(t.TempDir(), "database-directory")
+	if err := os.MkdirAll(databaseDirectory, 0o755); err != nil {
+		t.Fatalf("create database directory: %v", err)
+	}
+	if _, err := Open(databaseDirectory); err == nil {
+		t.Fatal("Open should fail when the database path is a directory")
+	}
+
+	emptyLegacyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(emptyLegacyDir, "items.json"), []byte(`{"items":[]}`), 0o600); err != nil {
+		t.Fatalf("write empty legacy state: %v", err)
+	}
+	emptyLegacyDB, err := Open(filepath.Join(emptyLegacyDir, "items.db"))
+	if err != nil {
+		t.Fatalf("Open empty legacy state: %v", err)
+	}
+	emptyLegacyDB.Close()
+	if _, err := os.Stat(filepath.Join(emptyLegacyDir, "items.json")); err != nil {
+		t.Errorf("empty legacy state should remain available: %v", err)
+	}
+
+	corruptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corruptDir, "items.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt legacy state: %v", err)
+	}
+	corruptDB, err := Open(filepath.Join(corruptDir, "items.db"))
+	if err != nil {
+		t.Fatalf("corrupt legacy state should not prevent Open: %v", err)
+	}
+	corruptDB.Close()
+
+	dateDir := t.TempDir()
+	datePath := filepath.Join(dateDir, "items.db")
+	dateDB, err := Open(datePath)
+	if err != nil {
+		t.Fatalf("Open date database: %v", err)
+	}
+	_, err = dateDB.db.Exec(`
+		INSERT INTO articles (id, feed, title, url, published, summary, first_seen)
+		VALUES ('dated', 'F', 'Dated', 'https://example.test/dated', 'Wed, 02 Oct 2024 15:00:00 GMT', '', '2024-10-02T15:00:00Z'),
+		       ('undated', 'F', 'Undated', 'https://example.test/undated', 'not a date', '', '2024-10-02T15:00:00Z')
+	`)
+	if err != nil {
+		dateDB.Close()
+		t.Fatalf("insert date rows: %v", err)
+	}
+	dateDB.Close()
+	dateDB, err = Open(datePath)
+	if err != nil {
+		t.Fatalf("reopen date database: %v", err)
+	}
+	items, err := dateDB.List(0)
+	dateDB.Close()
+	if err != nil {
+		t.Fatalf("list backfilled dates: %v", err)
+	}
+	byID := map[string]feed.Item{}
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	if byID["dated"].PublishedAt == 0 || byID["undated"].PublishedAt != 0 {
+		t.Errorf("backfilled dates = dated:%d undated:%d", byID["dated"].PublishedAt, byID["undated"].PublishedAt)
+	}
+}
+
+func TestSearchForFeedsAndStoreFilters(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Upsert([]feed.Item{
+		{ID: "tech", Feed: "Tech", Title: "Go language", URL: "https://x/tech", Summary: "compiler"},
+		{ID: "news", Feed: "News", Title: "Go news", URL: "https://x/news", Summary: "headlines"},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	results, err := s.SearchForFeeds("Go", 0, "", "Tech", "Tech")
+	if err != nil {
+		t.Fatalf("SearchForFeeds: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "tech" {
+		t.Fatalf("scoped search = %+v", results)
+	}
+	results, err = s.Search("   ", 0)
+	if err != nil {
+		t.Fatalf("empty Search: %v", err)
+	}
+	if results == nil || len(results) != 0 {
+		t.Fatalf("empty Search = %+v", results)
+	}
+	items, err := s.List(0, "", "Missing")
+	if err != nil {
+		t.Fatalf("empty feed filter: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("empty feed filter = %+v", items)
+	}
+}
+
+func TestStoreRetentionPrefetchAndMutationEdges(t *testing.T) {
+	s := openTestStore(t)
+	if removed, err := s.Prune(0); err != nil || removed != 0 {
+		t.Fatalf("Prune disabled = (%d, %v)", removed, err)
+	}
+	if _, err := s.Upsert([]feed.Item{{ID: "only", Feed: "F", Title: "Only", URL: "https://x/only"}}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if removed, err := s.Prune(2); err != nil || removed != 0 {
+		t.Fatalf("Prune under limit = (%d, %v)", removed, err)
+	}
+	if known, err := s.KnownIDs(nil); err != nil || len(known) != 0 {
+		t.Fatalf("KnownIDs empty = (%v, %v)", known, err)
+	}
+	if err := s.SetTags("only", nil); err != nil {
+		t.Fatalf("SetTags empty: %v", err)
+	}
+	if err := s.SetContent("missing", "ignored"); err != nil {
+		t.Fatalf("SetContent unknown: %v", err)
+	}
+	if err := s.SetStarred("missing", true); err != nil {
+		t.Fatalf("SetStarred unknown: %v", err)
+	}
+	if err := s.RecordPrefetchFailure("missing", "ignored"); err != nil {
+		t.Fatalf("RecordPrefetchFailure unknown: %v", err)
+	}
+	if err := s.MarkAllRead(true, "F"); err != nil {
+		t.Fatalf("scoped MarkAllRead: %v", err)
+	}
+
+	if _, err := s.Upsert([]feed.Item{{ID: "retry", Feed: "F", Title: "Retry", URL: "https://x/retry"}}); err != nil {
+		t.Fatalf("Upsert retry: %v", err)
+	}
+	for i := 0; i < 18; i++ {
+		if err := s.RecordPrefetchFailure("retry", strings.Repeat("x", i)); err != nil {
+			t.Fatalf("RecordPrefetchFailure %d: %v", i, err)
+		}
+	}
+	var attempts int
+	var next string
+	if err := s.db.QueryRow(`SELECT prefetch_attempts, prefetch_next_at FROM articles WHERE id = 'retry'`).Scan(&attempts, &next); err != nil {
+		t.Fatalf("read retry state: %v", err)
+	}
+	if attempts != 16 || next == "" {
+		t.Errorf("retry state = attempts:%d next:%q", attempts, next)
+	}
+	if err := s.SetContent("retry", "recovered"); err != nil {
+		t.Fatalf("clear retry state: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT prefetch_attempts, prefetch_next_at FROM articles WHERE id = 'retry'`).Scan(&attempts, &next); err != nil {
+		t.Fatalf("read cleared retry state: %v", err)
+	}
+	if attempts != 0 || next != "" {
+		t.Errorf("cleared retry state = attempts:%d next:%q", attempts, next)
+	}
+}
+
+func TestStoreSerializationHelpersAndDeduplicationEdges(t *testing.T) {
+	if got := encodeCategories(nil); got != "" {
+		t.Errorf("encodeCategories(nil) = %q", got)
+	}
+	if got := encodeTags([]string{" Go ", "go", "", "RSS"}); got != `["Go","RSS"]` {
+		t.Errorf("encodeTags normalized = %q", got)
+	}
+	if got := encodeTags([]string{"", "   "}); got != "" {
+		t.Errorf("encodeTags all empty = %q", got)
+	}
+	if got := decodeCategories(""); got == nil || len(got) != 0 {
+		t.Errorf("decodeCategories empty = %#v", got)
+	}
+	if got := decodeCategories("not json"); got == nil || len(got) != 0 {
+		t.Errorf("decodeCategories malformed = %#v", got)
+	}
+	if got := decodeTags(""); got == nil || len(got) != 0 {
+		t.Errorf("decodeTags empty = %#v", got)
+	}
+	if got := decodeTags("not json"); got == nil || len(got) != 0 {
+		t.Errorf("decodeTags malformed = %#v", got)
+	}
+	where, args := feedFilter([]string{" F ", "F", ""})
+	if where != "feed IN (?)" || len(args) != 1 || args[0] != "F" {
+		t.Errorf("feedFilter dedup = (%q, %#v)", where, args)
+	}
+	where, args = feedFilter([]string{"", "  "})
+	if where != "1 = 0" || len(args) != 0 {
+		t.Errorf("feedFilter empty = (%q, %#v)", where, args)
+	}
+	items := deduplicateItems([]feed.Item{
+		{ID: "missing-url", Feed: "F", Title: "Missing URL"},
+		{ID: "missing-title", Feed: "F", URL: "https://x/title"},
+		{ID: "valid", Feed: " F ", Title: "Valid", URL: " https://x/item "},
+		{ID: "duplicate", Feed: "F", Title: "Duplicate", URL: " https://x/item "},
+	})
+	if len(items) != 1 || items[0].ID != "valid" {
+		t.Fatalf("deduplicate edge cases = %+v", items)
+	}
+}
+
+func TestBackupValidationHelpers(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	if err := os.WriteFile(source, []byte("source"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := validateDatabaseSource(""); err == nil {
+		t.Error("empty source should fail")
+	}
+	if err := validateDatabaseSource(filepath.Join(dir, "missing.db")); err == nil {
+		t.Error("missing source should fail")
+	}
+	if err := validateDatabaseSource(dir); err == nil {
+		t.Error("directory source should fail")
+	}
+	if err := validateDatabaseSource(source); err != nil {
+		t.Fatalf("regular source: %v", err)
+	}
+	if err := validateDistinctDatabasePaths(source, ""); err == nil {
+		t.Error("empty destination should fail")
+	}
+	if err := validateDistinctDatabasePaths(source, source); err == nil {
+		t.Error("same destination should fail")
+	}
+	if err := validateDistinctDatabasePaths(source, source+"-wal"); err == nil {
+		t.Error("WAL sidecar destination should fail")
+	}
+	link := filepath.Join(dir, "source-link.db")
+	if err := os.Link(source, link); err != nil {
+		t.Fatalf("create source hard link: %v", err)
+	}
+	if err := validateDistinctDatabasePaths(source, link); err == nil {
+		t.Error("same-file hard link destination should fail")
+	}
+	if err := validateDistinctDatabasePaths(source, filepath.Join(dir, "new", "destination.db")); err != nil {
+		t.Fatalf("distinct destination: %v", err)
+	}
+
+	if err := prepareDatabaseDestination(filepath.Join(dir, "nested", "snapshot.db")); err != nil {
+		t.Fatalf("prepare destination: %v", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		path := filepath.Join(dir, "nested", "snapshot.db") + suffix
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+			t.Fatalf("write old destination %s: %v", suffix, err)
+		}
+	}
+	if err := prepareDatabaseDestination(filepath.Join(dir, "nested", "snapshot.db")); err != nil {
+		t.Fatalf("prepare existing destination: %v", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if _, err := os.Stat(filepath.Join(dir, "nested", "snapshot.db") + suffix); !os.IsNotExist(err) {
+			t.Errorf("destination sidecar %s still exists: %v", suffix, err)
+		}
+	}
+}
+
+func TestRebuildFTSReportsExecutorErrors(t *testing.T) {
+	first := &failingExecer{failAt: 1}
+	if err := rebuildFTS(first); err == nil || first.calls != 1 {
+		t.Fatalf("first FTS error = %v after %d calls", err, first.calls)
+	}
+	second := &failingExecer{failAt: 2}
+	if err := rebuildFTS(second); err == nil || second.calls != 2 {
+		t.Fatalf("second FTS error = %v after %d calls", err, second.calls)
+	}
+}
+
+type failingExecer struct {
+	failAt int
+	calls  int
+}
+
+func (f *failingExecer) Exec(string, ...interface{}) (sql.Result, error) {
+	f.calls++
+	if f.calls == f.failAt {
+		return nil, errors.New("executor failed")
+	}
+	return nil, nil
+}
+
+func TestBackupAndRestoreRejectInvalidSourcesAndDestinations(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	if err := os.WriteFile(source, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := Backup(filepath.Join(dir, "missing.db"), filepath.Join(dir, "backup.db")); err == nil {
+		t.Error("Backup should reject missing source")
+	}
+	if err := Backup(source, source); err == nil {
+		t.Error("Backup should reject same path")
+	}
+	if err := Backup(source, filepath.Join(dir, "invalid-backup.db")); err == nil {
+		t.Error("Backup should reject an invalid SQLite source during the online copy")
+	}
+	if err := Restore(filepath.Join(dir, "target.db"), filepath.Join(dir, "missing.db")); err == nil {
+		t.Error("Restore should reject missing source")
+	}
+	if err := Restore(source, source); err == nil {
+		t.Error("Restore should reject same path")
+	}
+	if err := Restore(filepath.Join(dir, "restore-target.db"), source); err == nil {
+		t.Error("Restore should reject an invalid SQLite source during the online copy")
+	}
+
+	maintenance, err := openMaintenanceDatabase(filepath.Join(dir, "maintenance.db"))
+	if err != nil {
+		t.Fatalf("openMaintenanceDatabase: %v", err)
+	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatalf("close maintenance database: %v", err)
 	}
 }

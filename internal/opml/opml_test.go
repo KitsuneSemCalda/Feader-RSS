@@ -2,6 +2,7 @@ package opml
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -61,4 +62,62 @@ func min(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func TestImportRejectsMalformedAndWrongRootDocuments(t *testing.T) {
+	if _, err := Import(strings.NewReader("not XML")); err == nil {
+		t.Fatal("malformed OPML should fail")
+	}
+	if _, err := Import(strings.NewReader(`<rss><channel /></rss>`)); err == nil {
+		t.Fatal("wrong OPML root should fail")
+	}
+}
+
+func TestImportUsesTextNamesAndFlattensNestedFolders(t *testing.T) {
+	input := `<opml><body><outline text="Outer"><outline text="Inner"><outline text="Readable name" xmlUrl=" https://example.test/feed " /></outline></outline></body></opml>`
+	feeds, err := Import(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Import nested folders: %v", err)
+	}
+	if len(feeds) != 1 || feeds[0].Name != "Readable name" || feeds[0].URL != "https://example.test/feed" || feeds[0].Folder != "Outer / Inner" {
+		t.Fatalf("nested folders = %+v", feeds)
+	}
+}
+
+func TestExportUsesURLForUnnamedFeedsAndReportsWriterErrors(t *testing.T) {
+	var output bytes.Buffer
+	if err := Export(&output, []Feed{
+		{Name: "", URL: "https://unnamed.test/feed"},
+		{Name: "Skipped", URL: "   "},
+		{Name: "Grouped", URL: "https://grouped.test/feed", Folder: "Tech"},
+		{Name: "Grouped two", URL: "https://grouped-two.test/feed", Folder: "Tech"},
+	}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if !strings.Contains(output.String(), `text="https://unnamed.test/feed"`) || strings.Count(output.String(), `text="Tech"`) != 1 || !strings.Contains(output.String(), "grouped-two.test") {
+		t.Fatalf("export fallback/grouping = %s", output.String())
+	}
+
+	headerFailure := &failingWriter{err: errors.New("header write failed"), failAfter: 0}
+	if err := Export(headerFailure, nil); err == nil || err.Error() != "header write failed" {
+		t.Fatalf("header writer error = %v", err)
+	}
+	encodeFailure := &failingWriter{err: errors.New("encode write failed"), failAfter: 1}
+	if err := Export(encodeFailure, []Feed{{Name: "Feed", URL: "https://example.test/feed"}}); err == nil || !strings.Contains(err.Error(), "encode write failed") {
+		t.Fatalf("encode writer error = %v", err)
+	}
+}
+
+type failingWriter struct {
+	writes    int
+	failAfter int
+	err       error
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if w.writes >= w.failAfter {
+		return 0, w.err
+	}
+	w.writes++
+	return len(p), nil
 }
