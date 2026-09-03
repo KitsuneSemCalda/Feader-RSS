@@ -41,6 +41,10 @@ var (
 	blankLinesRE = regexp.MustCompile(`\n{3,}`)
 )
 
+var get = safefetch.Get
+var fetchArticle = Fetch
+var sleep = time.Sleep
+
 // Extract walks the parsed HTML tree and produces (title, readable content),
 // mirroring the block/skip-tag behavior of the Python ArticleParser.
 func Extract(r io.Reader) (title, content string, err error) {
@@ -123,7 +127,7 @@ func Extract(r io.Reader) (title, content string, err error) {
 
 // Fetch downloads url and extracts its readable title/content.
 func Fetch(url string) (*Article, error) {
-	resp, err := safefetch.Get(url, 20*time.Second)
+	resp, err := get(url, 20*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +162,7 @@ func FetchWithRetry(url string, attempts int, backoff time.Duration) (*Article, 
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		result, err := Fetch(url)
+		result, err := fetchArticle(url)
 		if err == nil {
 			return result, nil
 		}
@@ -177,7 +181,7 @@ func FetchWithRetry(url string, attempts int, backoff time.Duration) (*Article, 
 		if delay > 5*time.Second {
 			delay = 5 * time.Second
 		}
-		time.Sleep(delay)
+		sleep(delay)
 	}
 	return nil, lastErr
 }

@@ -22,6 +22,12 @@ const UserAgent = "io.github.kitsunesemcalda.feader-rss/0.2"
 
 var allowedSchemes = map[string]bool{"http": true, "https": true}
 
+var lookupNetIP = net.DefaultResolver.LookupNetIP
+
+var doHTTP = func(client *http.Client, req *http.Request) (*http.Response, error) {
+	return client.Do(req)
+}
+
 // ErrResponseTooLarge is returned by ReadCapped when the response exceeds the limit.
 type ErrResponseTooLarge struct{ Limit int64 }
 
@@ -134,7 +140,7 @@ func requireSafeURL(rawURL string) (*url.URL, []netip.Addr, error) {
 		return nil, nil, fmt.Errorf("URL is missing a hostname")
 	}
 
-	ips, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", hostname)
+	ips, err := lookupNetIP(context.Background(), "ip", hostname)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not resolve host: %s", hostname)
 	}
@@ -198,7 +204,7 @@ func Get(rawURL string, timeout time.Duration) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", UserAgent)
-	resp, err := client.Do(req)
+	resp, err := doHTTP(client, req)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,16 @@
 package feed
 
 import (
+	"errors"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"github.com/KitsuneSemCalda/feader-rss/internal/safefetch"
 )
 
 const rssSample = `<?xml version="1.0"?>
@@ -227,5 +233,144 @@ func TestArticleIDStable(t *testing.T) {
 	id3 := articleID("other-feed", "https://example.com/x")
 	if id1 == id3 {
 		t.Errorf("articleID should depend on feed name")
+	}
+}
+
+func TestHelpersHandleFallbacksAndEmptyValues(t *testing.T) {
+	if got := cleanFallback(`<p>Hello &amp; <b>world</b></p><script>secret()</script>`); got != "Hello & world secret()" {
+		t.Errorf("cleanFallback = %q", got)
+	}
+	if got := truncateRunes("hello", 0); got != "" {
+		t.Errorf("truncateRunes zero = %q", got)
+	}
+	if got := truncateRunes("hello", 10); got != "hello" {
+		t.Errorf("truncateRunes within limit = %q", got)
+	}
+	if got := truncateRunes("hello", 3); got != "hel" {
+		t.Errorf("truncateRunes over limit = %q", got)
+	}
+	if got := PublishedTimestamp(""); got != 0 {
+		t.Errorf("empty PublishedTimestamp = %d", got)
+	}
+	if got := normalizeCategories("", " News ", "news", "Tech"); len(got) != 2 || got[0] != "News" || got[1] != "Tech" {
+		t.Errorf("normalizeCategories = %#v", got)
+	}
+	if got := resolveLink("/path", nil); got != "/path" {
+		t.Errorf("resolveLink without base = %q", got)
+	}
+	base, err := url.Parse("https://example.test/feed")
+	if err != nil {
+		t.Fatalf("parse base: %v", err)
+	}
+	if got := resolveLink(":bad", base); got != ":bad" {
+		t.Errorf("resolveLink invalid reference = %q", got)
+	}
+	if got := atomAuthorName([]atomAuthor{{Email: "author@example.test"}}); got != "author@example.test" {
+		t.Errorf("email author = %q", got)
+	}
+	if got := atomAuthorName(nil); got != "" {
+		t.Errorf("empty author = %q", got)
+	}
+	if got := atomLinkHref(nil); got != "" {
+		t.Errorf("empty atom links = %q", got)
+	}
+	if got := atomLinkHref([]atomLink{{Rel: "self", Href: "https://example.test/self"}}); got != "https://example.test/self" {
+		t.Errorf("fallback atom link = %q", got)
+	}
+	if got := atomLinkHref([]atomLink{{Href: "https://example.test/default"}}); got != "https://example.test/default" {
+		t.Errorf("default atom link = %q", got)
+	}
+}
+
+func TestParseSkipsEntriesWithoutTitleOrLink(t *testing.T) {
+	xmlDoc := `<rss version="2.0"><channel>
+		<item><title></title><link>https://example.test/no-title</link></item>
+		<item><title>No URL</title><link></link></item>
+	</channel></rss>`
+	items, err := Parse("Sample", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want no incomplete entries", items)
+	}
+
+	atomDoc := `<feed xmlns="http://www.w3.org/2005/Atom"><entry><title></title><link href="https://example.test/no-title"/></entry><entry><title>No URL</title></entry></feed>`
+	items, err = Parse("Atom", []byte(atomDoc))
+	if err != nil {
+		t.Fatalf("Parse Atom: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Atom items = %+v, want no incomplete entries", items)
+	}
+}
+
+func TestFetchUsesGetterAndFetchWithRetry(t *testing.T) {
+	oldGet := get
+	t.Cleanup(func() { get = oldGet })
+	get = func(url string, timeout time.Duration) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`<rss version="2.0"><channel><item><title>Fetched</title><link>/item</link></item></channel></rss>`)),
+		}, nil
+	}
+	items, err := Fetch("Example", "https://example.test/feed.xml")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.test/item" {
+		t.Fatalf("fetched items = %+v", items)
+	}
+
+	get = func(string, time.Duration) (*http.Response, error) {
+		return nil, errors.New("feed transport failed")
+	}
+	if _, err := Fetch("Example", "https://example.test/feed.xml"); err == nil || err.Error() != "feed transport failed" {
+		t.Errorf("Fetch getter error = %v", err)
+	}
+}
+
+func TestFetchWithRetryRetriesTransientFailuresAndNormalizesOptions(t *testing.T) {
+	oldFetch, oldSleep := fetchFeed, sleep
+	t.Cleanup(func() {
+		fetchFeed = oldFetch
+		sleep = oldSleep
+	})
+	var delays []time.Duration
+	sleep = func(delay time.Duration) { delays = append(delays, delay) }
+	calls := 0
+	fetchFeed = func(name, rawURL string) ([]Item, error) {
+		calls++
+		if calls <= 5 {
+			return nil, &safefetch.HTTPStatusError{Code: http.StatusBadGateway, Status: "502 Bad Gateway"}
+		}
+		return []Item{{ID: "recovered", Feed: name, Title: "Recovered", URL: rawURL}}, nil
+	}
+	items, err := FetchWithRetry("Example", "https://example.test/retry", 6, time.Second)
+	if err != nil {
+		t.Fatalf("FetchWithRetry: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "recovered" || calls != 6 {
+		t.Fatalf("retry result=%+v calls=%d", items, calls)
+	}
+	wantDelays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second}
+	if len(delays) != len(wantDelays) {
+		t.Fatalf("retry delays = %v, want %v", delays, wantDelays)
+	}
+	for i := range delays {
+		if delays[i] != wantDelays[i] {
+			t.Errorf("delay %d = %s, want %s", i, delays[i], wantDelays[i])
+		}
+	}
+
+	calls = 0
+	delays = nil
+	fetchFeed = func(string, string) ([]Item, error) {
+		calls++
+		return nil, errors.New("invalid feed")
+	}
+	if items, err := FetchWithRetry("Example", "bad", 0, -time.Second); err == nil || items != nil || calls != 1 {
+		t.Fatalf("permanent retry result=%+v err=%v calls=%d", items, err, calls)
 	}
 }

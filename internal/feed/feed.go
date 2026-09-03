@@ -116,6 +116,10 @@ var summarySkipTags = map[string]bool{
 	"svg": true,
 }
 
+var get = safefetch.Get
+var fetchFeed = Fetch
+var sleep = time.Sleep
+
 // clean extracts readable text from an RSS/Atom HTML fragment. Using the HTML
 // parser instead of a tag regexp prevents script/style contents from leaking
 // into the article summary and preserves paragraph boundaries for the UI.
@@ -390,7 +394,7 @@ func atomLinkHref(links []atomLink) string {
 
 // Fetch downloads and parses the feed at url, labelling items with name.
 func Fetch(name, rawURL string) ([]Item, error) {
-	resp, err := safefetch.Get(rawURL, 15*time.Second)
+	resp, err := get(rawURL, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +421,7 @@ func FetchWithRetry(name, rawURL string, attempts int, backoff time.Duration) ([
 
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		items, err := Fetch(name, rawURL)
+		items, err := fetchFeed(name, rawURL)
 		if err == nil {
 			return items, nil
 		}
@@ -436,7 +440,7 @@ func FetchWithRetry(name, rawURL string, attempts int, backoff time.Duration) ([
 		if delay > 5*time.Second {
 			delay = 5 * time.Second
 		}
-		time.Sleep(delay)
+		sleep(delay)
 	}
 	return nil, lastErr
 }
