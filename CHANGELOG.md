@@ -4,6 +4,88 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Fixed raw markup leaking into extracted article text and RSS summaries:
+  `<noscript>` (tracking pixels, lazy-load CSS fallbacks, "enable JavaScript
+  to view comments" widgets like Disqus's) and `<template>` (inert content
+  never meant to render) were not in the skip-tag list. `golang.org/x/net/html`
+  hands back `<noscript>` content as one literal text node — tag syntax
+  included — so without an explicit skip it appeared verbatim in the reader;
+  `<template>` content is real child elements but is never rendered by spec.
+  Affected roughly half of the cached articles in real-world testing.
+
+### Changed
+- Simplified the reader's visual language: removed decorative symbols
+  (★ ☆ ⚡ ⚠ 📁) from badges, the save button, the folder filter, and error
+  text, keeping the shared Omarchy button icon set untouched. `Color.accent`
+  is now reserved for the unread count and keyboard selection; the article
+  title, the "UNREAD" badge, and the unread left border no longer carry
+  color, relying on font weight and label text instead. The unread inbox
+  summary card is now a neutral panel with only its count in accent.
+- Improved article-reading typography: the RSS summary and full article text
+  now use proportional line-height for better paragraph readability, and the
+  "RSS SUMMARY"/"FULL ARTICLE" section labels use slight letter-spacing.
+
+### Security
+- `safefetch` now falls back across every validated public IP address for a
+  host (previously only the first) when connecting and following redirects,
+  so a host with multiple or mixed-family DNS answers no longer fails
+  outright when one address is unreachable.
+- The SQLite state directory, database file, and its WAL/SHM sidecars are now
+  restricted to `0700`/`0600`; backup snapshots and their directory follow
+  the same restriction, so other local users cannot read feed content or
+  read/unread state from the local cache.
+- Article ids are now derived from the feed's URL instead of its editable
+  display name, so renaming a feed no longer discards its read/starred/tag
+  history or re-triggers "new article" notifications for articles already
+  seen. Existing databases are migrated automatically the next time each
+  configured feed is fetched.
+- Article links are now canonicalized (lowercased scheme/host, default port
+  and fragment stripped) before being stored or hashed into an id, so two
+  publisher URLs that are guaranteed equivalent by the URL spec no longer
+  produce duplicate cache entries. The path and query string, where a real
+  difference in meaning is possible, are left untouched.
+- Feed configuration loaded from disk (a hand-edited file or an OPML import)
+  is now validated and capped at 8 feeds, matching the settings UI: invalid
+  or duplicate URLs are dropped, and `opml-import` reports `truncated: true`
+  when the merged list exceeded the limit.
+- `scripts/install.sh` now builds/downloads the binary into a staging
+  directory and verifies everything before touching the live plugin
+  directory, so a failed build, download, or attestation check leaves the
+  previous installation untouched instead of partially replaced. A failed
+  local build no longer silently falls back to a downloaded binary; that now
+  requires the explicit `FEADER_RSS_ALLOW_REMOTE_FALLBACK=1` environment
+  variable, or the install fails with a diagnostic.
+- The downloaded release binary's attestation is now also checked against
+  the exact release workflow file and the source tag it must have been
+  built from (`--signer-workflow`, `--source-ref`), not just the repository.
+- CI now fails a release if `manifest.json`'s version does not match the
+  git tag being released.
+
+### Fixed
+- Fixed the save/star button in the reader: it silently failed on every
+  click because the `--value` flag was passed as two separate process
+  arguments, which Go's flag parser does not accept for a boolean flag.
+- Fixed a QML reference error (`Cannot read property 'running' of
+  undefined`) in the article list's status line, which fired on every
+  re-render because it addressed the search process through a nonexistent
+  `root.searchProcess` instead of `searchProcess`.
+- Fixed silent persistence failures: saving feed settings previously reported
+  "Feeds saved" even when the write to `rss-reader.json` failed (e.g. a
+  dangling symlink, a missing directory, or a permissions problem), losing
+  the change with no indication anything went wrong. The panel now reports
+  the actual outcome (`onSaved`/`onSaveFailed`), surfaces a non-`FileNotFound`
+  config load failure the same way, and creates the config directory
+  upfront alongside the existing state directory.
+- `rss-reader.json` is now written atomically (temp file + rename), matching
+  the existing UI-preferences file, so a crash or power loss mid-write can no
+  longer leave a truncated config that silently loads as "no feeds
+  configured".
+- Added a test exercising the database the way the plugin actually uses it:
+  many short-lived connections against the same `items.db` file mutating and
+  reading concurrently, confirming WAL mode and the existing busy timeout
+  absorb real cross-process contention without errors or lost writes.
+
 ## [0.3.3] - 2026-09-02
 
 ### Added

@@ -72,19 +72,23 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
 - [x] Removidos `rss-fetch.py` e `tests/test_rss_fetch.py` (paridade coberta pelos testes Go)
 - [x] `tests/test_ui_accessibility.py` atualizado para as novas asserções de comando (`fetchBinary`, `dbPath`)
 - [x] `.gitignore` atualizado: binário compilado, `dist/`, arquivos `*.db*`
-- [ ] Atualizar `README.md` (requisitos: Go em vez de Python, instruções de build/uso do binário)
-- [ ] Bump de versão no `manifest.json` (necessário antes do próximo `git tag vX.Y.Z` para a release funcionar)
+- [x] Atualizar `README.md` (requisitos: Go em vez de Python, instruções de build/uso do binário)
+- [x] Bump de versão no `manifest.json` (necessário antes do próximo `git tag vX.Y.Z` para a release funcionar)
 
 ## Observações
 - Prioridade alta: preservar exatamente as proteções de SSRF/DNS-rebinding já implementadas
   (commits `7dca620`, `a76329f`, `09cc542`) — feito e testado em `internal/safefetch`.
 - Formato do `id` do artigo (`sha256[:24]`) preservado — compatível com qualquer estado antigo,
   embora o formato de armazenamento tenha mudado de JSON para SQLite (arquivo `items.db`).
-- Pendente: validar o fluxo dentro do Quickshell de verdade (não só via CLI) — abrir o painel,
-  configurar feeds, refresh automático pelo timer, abrir artigo, marcar como lido/não lido.
-- Pendente: `scripts/install.sh` depende de uma release publicada (`vX.Y.Z` com os assets); antes
-  do primeiro release com binários Go, o passo `fetch_binary` vai falhar — precisa de um primeiro
-  `git tag`/push para popular a release.
+- [x] Validado o fluxo dentro do Quickshell de verdade em 2026-09-03: instalado o binário local via
+  `./scripts/install.sh` (reescrito para montar em staging e trocar atomicamente), reiniciado o
+  shell, feeds reais (`hnrss.org`, `xkcd.com`) buscados de ponta a ponta pelo binário instalado, e
+  o ícone da barra refletiu corretamente o estado "não lido". O teste ao vivo encontrou e corrigiu
+  dois bugs reais: o botão de salvar/favoritar (`--value` passado como dois argumentos separados,
+  que o parser de flags do Go não aceita para booleanos) e um `TypeError` no log do Quickshell
+  (`root.searchProcess` em vez de `searchProcess` na linha de status da lista).
+- `scripts/install.sh` já depende de uma release publicada para o caminho `fetch_binary`; o
+  primeiro release (`v0.1.0` em diante) já existe, então isso não é mais um bloqueio.
 
 ## 11. Auditoria do leitor e próxima fase — 2026-08-28
 
@@ -114,21 +118,21 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
   primeiros `maxItems`.
 - [x] Registrar falhas de prefetch com retry/backoff persistente para não repetir indefinidamente
   as mesmas requisições a cada refresh.
-- [ ] Usar todos os endereços públicos validados como fallback de conexão; hoje apenas o primeiro
+- [x] Usar todos os endereços públicos validados como fallback de conexão; hoje apenas o primeiro
   IP retornado pelo DNS é tentado, o que pode falhar em hosts com IPv6 indisponível.
-- [ ] Restringir permissões do diretório/arquivo SQLite (`0700`/`0600`) e documentar a política
+- [x] Restringir permissões do diretório/arquivo SQLite (`0700`/`0600`) e documentar a política
   de privacidade do cache local.
 
 ### Identidade e compatibilidade de artigos
-- [ ] Fazer o ID depender da identidade estável do feed (URL canônica ou ID Atom/RSS), não do
+- [x] Fazer o ID depender da identidade estável do feed (URL canônica ou ID Atom/RSS), não do
   nome editável exibido ao usuário; preservar IDs antigos através de migração/alias.
 - [x] Deduplicar itens repetidos dentro de uma mesma resposta antes de gerar `newItems` e
   notificações.
-- [ ] Normalizar URLs de artigos com cuidado, sem alterar o caminho/query de forma incorreta,
+- [x] Normalizar URLs de artigos com cuidado, sem alterar o caminho/query de forma incorreta,
   e adicionar índice para consultas por URL no cache.
 
 ### Configuração e frontend
-- [ ] Validar e normalizar configurações carregadas de arquivo: limite de oito feeds, nomes/URLs
+- [x] Validar e normalizar configurações carregadas de arquivo: limite de oito feeds, nomes/URLs
   válidos, `maxItems`, intervalo e preferências com números finitos.
 - [x] Evitar que `mark all` opere silenciosamente sobre artigos de feeds removidos: a ação agora
   se aplica somente aos feeds configurados.
@@ -136,6 +140,16 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
   subconjunto carregado na UI.
 - [ ] Executar um teste manual/automatizado real no Quickshell: abrir painel, trocar tema,
   configurar feed, refresh, filtros, teclado, detalhe, cache e ciclo de vida do processo.
+  Parcial (2026-09-03): validado via instalação real + reinício do shell — configuração de feed,
+  refresh automático real (fetch de `hnrss.org`/`xkcd.com`), persistência SQLite e o ícone da
+  barra refletindo não-lidos, sem crashes/erros no log do Quickshell após os três fixes acima
+  (favoritar via `--value`, `root.searchProcess`, e falha silenciosa ao salvar/carregar
+  `rss-reader.json` — `configFile` não tinha `onSaveFailed`/`onLoadFailed`, então uma escrita
+  falha, como a causada por um symlink quebrado, era reportada como "Feeds saved" mesmo sem
+  persistir nada).
+  Ainda falta clicar de fato no painel (abrir, trocar tema, filtros, teclado, detalhe) — não há
+  automação segura de clique de mouse disponível neste ambiente; requer um humano ou uma sessão
+  com automação de input configurada.
 - [ ] Substituir os testes QML baseados apenas em busca de strings por testes de comportamento
   onde a infraestrutura do Quickshell permitir.
 
@@ -145,19 +159,42 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
 - [ ] Amarrar o binário instalado a uma referência imutável e revisada (commit/tag protegido,
   digest esperado ou artefato construído a partir do source revisado). O checksum baixado da
   mesma release mutável não é suficiente por si só.
-- [ ] Tornar a verificação de attestation explícita quanto ao workflow e ao commit de origem,
+  Parcialmente melhorado: a verificação de attestation agora também fixa o workflow assinante e o
+  ref de origem (item abaixo), reduzindo a superfície de forja. Falta algo mais estrutural — um
+  digest esperado revisado e commitado *antes* da release (ex.: um arquivo tipo
+  `RELEASE_DIGESTS.json` atualizado por um mantenedor após verificação independente) — para que o
+  instalador não dependa inteiramente de artefatos publicados na mesma release potencialmente
+  comprometida. Isso muda o processo de corte de release; vale alinhar com o mantenedor antes de
+  implementar.
+- [x] Tornar a verificação de attestation explícita quanto ao workflow e ao commit de origem,
   em vez de verificar somente o repositório com `gh attestation verify --repo`.
-- [ ] Fazer o instalador montar uma cópia temporária e trocar o plugin somente depois que o
+- [x] Fazer o instalador montar uma cópia temporária e trocar o plugin somente depois que o
   binário foi construído/verificado; uma falha hoje pode deixar a instalação parcialmente limpa.
-- [ ] Não cair silenciosamente para um binário remoto quando o build local falha; oferecer uma
+- [x] Não cair silenciosamente para um binário remoto quando o build local falha; oferecer uma
   escolha explícita ou falhar com diagnóstico.
-- [ ] Validar no CI que a versão do `manifest.json` corresponde à tag da release.
+- [x] Validar no CI que a versão do `manifest.json` corresponde à tag da release.
 
 ### Qualidade e documentação
 - [x] Adicionar cobertura para status HTTP, metadados RSS/Atom, links relativos, Unicode e
   migração do schema SQLite.
 - [ ] Completar a matriz de testes para redirects seguros/privados, charset, conteúdo RSS/Atom
   completo, datas inválidas, concorrência do SQLite e CLI.
+  Redirects seguros/privados e charset já cobertos (`TestGetRedirectGuards`,
+  `internal/article`). Concorrência do SQLite coberta em 2026-09-03 por
+  `TestConcurrentMultiConnectionAccessDoesNotFailOrCorrupt` (90 goroutines,
+  cada uma com sua própria conexão contra o mesmo arquivo, misturando
+  `MarkRead`/`SetStarred`/`List` — confirma que WAL + `busy_timeout(5000)`
+  absorve a contenção real entre processos sem erros nem perda de escrita).
+  Conteúdo RSS/Atom "completo" também avançou em 2026-09-03: achado via teste
+  ao vivo (usuário reportou "lendo o rss não está bem formatado") que
+  `<noscript>` e `<template>` vazavam marcação bruta (pixels de rastreamento,
+  CSS de lazy-load, widget do Disqus) tanto no artigo completo
+  (`internal/article`) quanto no resumo RSS (`internal/feed`), já que o
+  `golang.org/x/net/html` devolve `<noscript>` como um único nó de texto
+  literal. Corrigido nos dois extratores com testes de regressão; afetava
+  ~metade (154/301) dos artigos já em cache no banco real testado.
+  Faltam datas de publicação inválidas/malformadas (não vazias) e mais
+  cobertura de CLI.
 - [ ] Fazer `go test -race ./...` funcionar no ambiente de CI e registrar a versão/toolchain
   suportada; no ambiente local de 2026-08-28 o Go 1.27 falha em `runtime/race` antes de rodar
   os testes (`package testmain cannot find package`).
