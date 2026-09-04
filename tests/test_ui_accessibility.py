@@ -28,7 +28,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
     def test_feed_filter_uses_dropdown(self):
         self.assertIn("id: feedFilterDropdown", PANEL)
         self.assertIn('{ value: "", label: "All feeds" }', PANEL)
-        self.assertIn('return { value: "folder:" + folder, label: "📁 " + folder }', PANEL)
+        self.assertIn('return { value: "folder:" + folder, label: "Folder: " + folder }', PANEL)
         self.assertIn('root.setSelectedFolder(selected.substring(7))', PANEL)
         self.assertIn('root.setSelectedFeed(selected)', PANEL)
 
@@ -159,7 +159,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("text: modelData.read ? \"READ\" : \"UNREAD\"", PANEL)
         self.assertIn('text: "RSS SUMMARY"', PANEL)
         self.assertIn('text: "FULL ARTICLE"', PANEL)
-        self.assertIn('text: root.selectedArticle && root.selectedArticle.starred ? "★ Saved" : "☆ Save"', PANEL)
+        self.assertIn('text: root.selectedArticle && root.selectedArticle.starred ? "Saved" : "Save"', PANEL)
         self.assertIn('placeholderText: "Tags, separated by commas"', PANEL)
 
     def test_reader_ui_exposes_status_and_interaction_feedback(self):

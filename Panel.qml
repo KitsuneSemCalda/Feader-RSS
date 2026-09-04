@@ -237,9 +237,9 @@ Panel {
     var tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : []
     tags = tags.map(function(tag) { return String(tag || "").trim() })
       .filter(function(tag) { return tag !== "" })
-    if (article.starred) parts.push("★ saved")
+    if (article.starred) parts.push("saved")
     if (tags.length > 0) parts.push("#" + tags.join(" #"))
-    if (article.cached) parts.push("⚡ ready")
+    if (article.cached) parts.push("ready")
     return parts.join(" · ")
   }
 
@@ -248,18 +248,40 @@ Panel {
     return summary !== "" ? summary : "This feed did not provide a summary. Open the article to read it."
   }
 
+  // Bounds and validates feeds coming from disk — a hand-edited config file
+  // or an OPML import can carry more than 8 entries, non-http(s) URLs, or
+  // duplicates that the settings form would otherwise have rejected.
+  function sanitizeFeeds(rawFeeds) {
+    var feeds = []
+    if (!Array.isArray(rawFeeds)) return feeds
+    var seenUrls = {}
+    var seenNames = {}
+    for (var i = 0; i < rawFeeds.length && feeds.length < 8; i++) {
+      var feed = rawFeeds[i]
+      if (!feed) continue
+      var url = String(feed.url || "").trim()
+      if (!/^https?:\/\/[^\s]+$/i.test(url)) continue
+      var normalizedUrl = url.toLowerCase().replace(/\/$/, "")
+      if (seenUrls[normalizedUrl]) continue
+      var name = String(feed.name || "").trim() || root.inferFeedName(url) || url
+      if (seenNames[name.toLowerCase()]) continue
+      seenUrls[normalizedUrl] = true
+      seenNames[name.toLowerCase()] = true
+      feeds.push({ name: name, url: url, folder: String(feed.folder || "").trim() })
+    }
+    return feeds
+  }
+
   function loadConfig(raw) {
     var value = loadJson(raw, null)
     if (value && Array.isArray(value.feeds)) {
-      root.config = value
+      var feeds = root.sanitizeFeeds(value.feeds)
+      root.config = Object.assign({}, value, { feeds: feeds })
       refreshMinutesDraft = root.normalizeRefreshMinutes(value.refreshMinutes || 5)
       retentionItemsDraft = root.resolvedRetentionItems
       feedModel.clear()
-      for (var i = 0; i < value.feeds.length; i++) {
-        var feed = value.feeds[i]
-        if (feed && feed.url) feedModel.append({
-          name: root.feedDisplayName(feed), url: String(feed.url), folder: String(feed.folder || "")
-        })
+      for (var i = 0; i < feeds.length; i++) {
+        feedModel.append(feeds[i])
       }
     }
   }
@@ -343,7 +365,11 @@ Panel {
     })
     configFile.setText(JSON.stringify(root.config, null, 2) + "\n")
     settingsOpen = false
-    status = "Feeds saved"
+    // The write is asynchronous; configFile's onSaved/onSaveFailed below
+    // correct this once Quickshell reports what actually happened, so a
+    // failed write (e.g. a broken symlink or a missing directory) is never
+    // reported to the user as a successful save.
+    status = "Saving feeds…"
     refresh()
   }
 
@@ -735,7 +761,10 @@ Panel {
     articles = next
     if (selectedArticle && String(selectedArticle.id || "") === articleId)
       selectedArticle = Object.assign({}, selectedArticle, { starred: starred })
-    Quickshell.execDetached([fetchBinary, "star", "--db", dbPath, "--value", starred ? "true" : "false", articleId])
+    // Go's flag package only accepts a boolean flag's value joined with "=";
+    // a separate array element (e.g. "--value", "true") leaves "true" as an
+    // extra positional argument and the command silently fails.
+    Quickshell.execDetached([fetchBinary, "star", "--db", dbPath, "--value=" + (starred ? "true" : "false"), articleId])
   }
 
   function parseTags(value) {
@@ -855,16 +884,40 @@ Panel {
 
   Process {
     id: initDir
-    command: ["mkdir", "-p", root.stateDir]
-    onExited: stateFile.reload()
+    // Also ensures the config directory exists: on a fresh XDG_CONFIG_HOME
+    // (or one where "omarchy" hasn't been created yet by anything else),
+    // writing rss-reader.json would otherwise fail with no indication why.
+    command: ["mkdir", "-p", root.stateDir, root.configHome + "/omarchy"]
+    onExited: { stateFile.reload(); configFile.reload() }
   }
 
   FileView {
     id: configFile
     path: root.configPath
     watchChanges: true
+    // Write to a temp file and rename it into place, matching stateFile
+    // below, so a crash or power loss mid-write leaves the last known-good
+    // rss-reader.json intact instead of a truncated file that would parse
+    // as empty and silently drop every configured feed on the next load.
+    atomicWrites: true
     printErrors: false
     onLoaded: { root.loadConfig(text()); stateFile.reload(); root.refresh() }
+    // A missing file is the normal first-run state (handled the same way
+    // onLoaded would with no feeds); any other error — e.g. a dangling
+    // symlink or a permissions problem — previously failed completely
+    // silently, leaving the panel stuck on an empty configuration with no
+    // indication why.
+    onLoadFailed: (error) => {
+      if (error !== FileViewError.FileNotFound) {
+        root.status = "Could not load feed configuration: " + FileViewError.toString(error)
+      }
+      stateFile.reload()
+      root.refresh()
+    }
+    onSaved: root.status = "Feeds saved"
+    onSaveFailed: (error) => {
+      root.status = "Could not save feeds: " + FileViewError.toString(error)
+    }
     onFileChanged: reload()
   }
 
@@ -883,6 +936,10 @@ Panel {
       if (root.searchQuery.trim() !== "") root.requestSearch()
       else root.loadInitialArticles()
     }
+    // Best-effort: UI preferences are not worth interrupting the reader over,
+    // but a silent failure here previously left no trace at all.
+    onSaveFailed: (error) => console.warn("io.github.kitsunesemcalda.feader-rss",
+      "could not save UI preferences: " + FileViewError.toString(error))
     onFileChanged: reload()
   }
 
@@ -1106,7 +1163,7 @@ Panel {
 
       Text {
         visible: !root.detailOpen && !root.settingsOpen && root.prefetchNote !== ""
-        text: "⚡ " + root.prefetchNote
+        text: root.prefetchNote
         color: root.dim; font.family: root.fontFamily
         font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap
         width: parent.width
@@ -1117,12 +1174,11 @@ Panel {
         visible: !root.detailOpen && !root.settingsOpen && root.config.feeds.length > 0
         width: parent.width
         height: inboxSummaryContent.y + inboxSummaryContent.implicitHeight + Style.space(10)
-        color: root.unreadCount > 0
-          ? Style.selectedFillFor(root.foreground, Color.accent)
-          : Style.normalFillFor(root.foreground, Color.accent)
-        borderSpec: root.unreadCount > 0
-          ? Border.controlSpec("selected", root.foreground, Color.accent)
-          : Border.controlSpec("normal", root.foreground, Color.accent)
+        // Neutral regardless of unread state — the unread count below is the
+        // one place this summary uses Color.accent, so it reads as the
+        // single signal worth noticing rather than a colored block.
+        color: Style.normalFillFor(root.foreground, root.foreground)
+        borderSpec: Border.controlSpec("normal", root.foreground, root.foreground)
         radius: Style.cornerRadius
 
         Column {
@@ -1173,7 +1229,7 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
           Text {
-            text: root.searchProcess.running ? "Searching saved articles…"
+            text: searchProcess.running ? "Searching saved articles…"
               : (root.unreadCount === 0 ? "All caught up" : "Open an article to mark it read")
             color: root.dim
             font.family: root.fontFamily
@@ -1312,7 +1368,7 @@ Panel {
             delegate: Text {
               required property var modelData
               width: parent.width
-              text: "⚠ " + String(modelData.name || modelData.feed || modelData.url || "Feed")
+              text: String(modelData.name || modelData.feed || modelData.url || "Feed")
                 + ": " + String(modelData.error || modelData.message || "failed to refresh")
               color: Color.urgent
               font.family: root.fontFamily
@@ -1400,7 +1456,7 @@ Panel {
         value: root.selectedFolder !== "" ? "folder:" + root.selectedFolder : root.selectedFeed
         options: [{ value: "", label: "All feeds" }].concat(
           root.configuredFolders().map(function(folder) {
-            return { value: "folder:" + folder, label: "📁 " + folder }
+            return { value: "folder:" + folder, label: "Folder: " + folder }
           })).concat(
           root.config.feeds.map(function(feed) {
             var v = root.feedDisplayName(feed)
@@ -1476,7 +1532,7 @@ Panel {
           id: articleTitle
           width: parent.width
           text: root.selectedArticle ? root.selectedArticle.title : ""
-          color: Color.accent; font.family: root.fontFamily
+          color: root.foreground; font.family: root.fontFamily
           font.pixelSize: Style.font.heading; font.bold: true
           font.underline: titleHover.hovered === true
           wrapMode: Text.WordWrap
@@ -1500,7 +1556,7 @@ Panel {
           width: parent.width
           spacing: Style.space(6)
           Button {
-            text: root.selectedArticle && root.selectedArticle.starred ? "★ Saved" : "☆ Save"
+            text: root.selectedArticle && root.selectedArticle.starred ? "Saved" : "Save"
             tooltipText: root.selectedArticle && root.selectedArticle.starred
               ? "Remove from saved articles" : "Save this article"
             foreground: root.foreground
@@ -1534,6 +1590,7 @@ Panel {
           width: parent.width
           text: "RSS SUMMARY"
           color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+          font.letterSpacing: 0.5
         }
         Text {
           width: parent.width
@@ -1541,6 +1598,8 @@ Panel {
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
+          lineHeight: 1.4
+          lineHeightMode: Text.ProportionalHeight
         }
         Text {
           width: parent.width
@@ -1552,7 +1611,7 @@ Panel {
         Text {
           width: parent.width
           visible: !root.articleLoading && root.articleError !== ""
-          text: "⚠ " + root.articleError
+          text: root.articleError
           color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
@@ -1562,6 +1621,7 @@ Panel {
           width: parent.width
           text: "FULL ARTICLE"
           color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+          font.letterSpacing: 0.5
         }
         Text {
           width: parent.width
@@ -1570,6 +1630,8 @@ Panel {
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
+          lineHeight: 1.4
+          lineHeightMode: Text.ProportionalHeight
         }
       }
 
@@ -1609,32 +1671,26 @@ Panel {
                 spacing: Style.space(6)
                 Text {
                   text: modelData.read ? "READ" : "UNREAD"
-                  color: modelData.read ? root.dim : Color.accent
+                  color: modelData.read ? root.dim : root.foreground
                   font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+                  font.letterSpacing: 0.5
                 }
                 Text {
                   visible: modelData.cached
-                  text: "⚡ READY"
+                  text: "READY"
                   color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                  font.letterSpacing: 0.5
                 }
                 Text {
                   visible: modelData.starred
-                  text: "★ SAVED"
-                  color: Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                  text: "SAVED"
+                  color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                  font.letterSpacing: 0.5
                 }
               }
               Text { id: title; width: parent.width; text: modelData.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: !modelData.read; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
               Text { id: meta; width: parent.width; text: root.articleMeta(modelData); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; maximumLineCount: 2; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
               Text { id: summary; width: parent.width; text: root.articleSummary(modelData); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; opacity: 0.8; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-            }
-            Rectangle {
-              visible: !modelData.read
-              x: articleCard.borderLeft
-              y: articleCard.borderTop
-              width: Style.space(3)
-              height: Math.max(0, articleCard.height - articleCard.borderTop - articleCard.borderBottom)
-              color: Color.accent
-              radius: Style.cornerRadius
             }
             MouseArea {
               anchors.fill: parent
