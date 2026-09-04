@@ -42,6 +42,9 @@ func Backup(sourcePath, destinationPath string) (err error) {
 	if err := runOnlineBackup(source, destinationPath, false); err != nil {
 		return fmt.Errorf("creating SQLite snapshot %s: %w", destinationPath, err)
 	}
+	if err := restrictDatabasePermissions(destinationPath); err != nil {
+		return fmt.Errorf("restricting SQLite snapshot permissions: %w", err)
+	}
 	return nil
 }
 
@@ -56,8 +59,11 @@ func Restore(destinationPath, sourcePath string) (err error) {
 		return err
 	}
 	if dir := filepath.Dir(destinationPath); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating SQLite destination dir: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("restricting SQLite destination dir permissions: %w", err)
 		}
 	}
 
@@ -79,6 +85,9 @@ func Restore(destinationPath, sourcePath string) (err error) {
 	// when restore created the destination database for the first time.
 	if _, err := destination.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		return fmt.Errorf("enabling WAL after restore: %w", err)
+	}
+	if err := restrictDatabasePermissions(destinationPath); err != nil {
+		return fmt.Errorf("restricting SQLite destination permissions: %w", err)
 	}
 	return nil
 }
@@ -136,8 +145,11 @@ func validateDistinctDatabasePaths(sourcePath, destinationPath string) error {
 
 func prepareDatabaseDestination(path string) error {
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating SQLite destination dir: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("restricting SQLite destination dir permissions: %w", err)
 		}
 	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {

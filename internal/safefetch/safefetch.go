@@ -155,17 +155,30 @@ func requireSafeURL(rawURL string) (*url.URL, []netip.Addr, error) {
 	return parsed, ips, nil
 }
 
-// pinnedDialer returns a dial function that always connects to pinnedIP,
-// ignoring whatever host net/http would otherwise resolve, while leaving
-// TLS SNI/verification (handled by http.Transport) keyed on the hostname.
-func pinnedDialer(pinnedIP netip.Addr) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// multiIPDialer returns a dial function that only ever connects to addresses
+// from ips (all already validated as public by requireSafeURL), ignoring
+// whatever host net/http would otherwise resolve, while leaving TLS
+// SNI/verification (handled by http.Transport) keyed on the hostname. It
+// tries each address in order and falls back to the next one if a connection
+// attempt fails, so a host that resolves to multiple addresses (e.g. an IPv6
+// address with no local route, alongside a reachable IPv4 one) is not
+// rejected outright.
+func multiIPDialer(ips []netip.Addr) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
 		dialer := &net.Dialer{Timeout: 20 * time.Second}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(pinnedIP.String(), port))
+		var lastErr error
+		for _, ip := range ips {
+			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, lastErr
 	}
 }
 
@@ -180,7 +193,7 @@ func Get(rawURL string, timeout time.Duration) (*http.Response, error) {
 	}
 
 	transport := &http.Transport{
-		DialContext:     pinnedDialer(ips[0]),
+		DialContext:     multiIPDialer(ips),
 		TLSClientConfig: &tls.Config{},
 	}
 	client := &http.Client{
@@ -194,7 +207,7 @@ func Get(rawURL string, timeout time.Duration) (*http.Response, error) {
 			if err != nil {
 				return err
 			}
-			transport.DialContext = pinnedDialer(redirIPs[0])
+			transport.DialContext = multiIPDialer(redirIPs)
 			return nil
 		},
 	}

@@ -66,11 +66,17 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open creates (if needed) and opens the database at path.
+// Open creates (if needed) and opens the database at path. The state
+// directory and the database file (including its WAL/SHM sidecars) are
+// restricted to the owner only, since the article cache can reveal a user's
+// reading history.
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("creating state dir: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("restricting state dir permissions: %w", err)
 		}
 	}
 	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
@@ -107,7 +113,30 @@ func Open(path string) (*Store, error) {
 		s.Close()
 		return nil, fmt.Errorf("building full-text search index: %w", err)
 	}
+	if err := restrictDatabasePermissions(path); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("restricting database file permissions: %w", err)
+	}
 	return s, nil
+}
+
+// restrictDatabasePermissions locks the database file and its WAL/SHM
+// sidecars (when present) down to owner-only read/write, since SQLite (and
+// the OS umask) would otherwise leave them group/world readable.
+func restrictDatabasePermissions(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		candidate := path + suffix
+		if _, err := os.Stat(candidate); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := os.Chmod(candidate, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureColumns adds fields introduced after the initial SQLite migration to
@@ -254,6 +283,83 @@ func (s *Store) autoMigrateLegacyState(dbPath string) error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// MigrateArticleIdentity moves stored articles from the legacy id scheme
+// (keyed on the feed's editable display name) to the current one (keyed on
+// the feed's URL), for every feed in feeds (display name -> URL). This lets
+// a user rename a feed without losing read/starred/tag state or
+// re-triggering "new article" notifications for articles already seen under
+// the old id. Rows belonging to a feed not present in feeds are left
+// untouched, since there is no current URL to migrate them to. It returns
+// the number of rows renamed.
+func (s *Store) MigrateArticleIdentity(feeds map[string]string) (int, error) {
+	if len(feeds) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	migrated := 0
+	for name, feedURL := range feeds {
+		feedURL = strings.TrimSpace(feedURL)
+		if name == "" || feedURL == "" {
+			continue
+		}
+		rows, err := tx.Query(`SELECT id, url FROM articles WHERE feed = ?`, name)
+		if err != nil {
+			return 0, err
+		}
+		type legacyRow struct{ id, url string }
+		var candidates []legacyRow
+		for rows.Next() {
+			var r legacyRow
+			if err := rows.Scan(&r.id, &r.url); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			candidates = append(candidates, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		rows.Close()
+
+		for _, r := range candidates {
+			if r.id != feed.LegacyArticleID(name, r.url) {
+				continue // already on the current scheme, or a foreign/imported id
+			}
+			newID := feed.ArticleID(feedURL, r.url)
+			if newID == r.id {
+				continue
+			}
+			var exists int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM articles WHERE id = ?`, newID).Scan(&exists); err != nil {
+				return 0, err
+			}
+			if exists > 0 {
+				continue // target id already taken; leave the legacy row alone
+			}
+			if _, err := tx.Exec(`UPDATE articles SET id = ? WHERE id = ?`, newID, r.id); err != nil {
+				return 0, err
+			}
+			migrated++
+		}
+	}
+	if migrated == 0 {
+		return 0, nil
+	}
+	if err := rebuildFTS(tx); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return migrated, nil
+}
 
 // Upsert inserts new items and updates mutable feed fields (title, published,
 // summary, author, categories) without touching stored read/starred/tags flags.

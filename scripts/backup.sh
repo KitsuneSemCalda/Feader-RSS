@@ -19,6 +19,7 @@ if [[ ! -f "${config_file}" && ! -f "${preferences_file}" && ! -f "${db_file}" &
 fi
 
 mkdir -p "${backup_root}"
+chmod 700 "${state_dir}" "${backup_root}"
 
 backup_stamp="$(date -u +%Y%m%dT%H%M%S%NZ)"
 backup_dir="${backup_root}/${backup_stamp}"

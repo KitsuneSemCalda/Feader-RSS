@@ -28,6 +28,7 @@ fi
 
 bash "$(dirname -- "${BASH_SOURCE[0]}")/backup.sh"
 mkdir -p "$(dirname -- "${config_file}")" "${state_dir}"
+chmod 700 "${state_dir}"
 
 if [[ -f "${backup_dir}/items.db" ]]; then
   restore_database "${db_file}" "${backup_dir}/items.db" >/dev/null

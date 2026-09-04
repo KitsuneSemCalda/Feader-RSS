@@ -143,9 +143,15 @@ line without hiding articles successfully loaded from the other feeds.
 
 Articles are stored in a SQLite database at
 `~/.local/state/omarchy/rss-reader/items.db` (a legacy `items.json` from
-earlier versions is imported automatically and left in place). The backup and
-restore scripts include both the current SQLite database and that legacy file
-when present. Left-click
+earlier versions is imported automatically and left in place). This database
+holds your reading history (which articles you opened, read, starred, or
+tagged) purely as a local cache; nothing in it is transmitted anywhere beyond
+the configured feed/article requests. Both the state directory and the
+database file (including its WAL/SHM sidecars) are restricted to `0700`/`0600`
+so other local users cannot read your feed content or read/unread state; the
+backup directory and its snapshots use the same restricted permissions. The
+backup and restore scripts include both the current SQLite database and that
+legacy file when present. Left-click
 opens the reader,
 middle-click refreshes it, and right-click opens the first unread article.
 Clicking an article marks it as read and loads the full text inside the reader;

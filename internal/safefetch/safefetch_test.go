@@ -243,8 +243,8 @@ func TestRequireSafeURLUsesResolverAndHandlesResolutionFailures(t *testing.T) {
 	}
 }
 
-func TestPinnedDialerConnectsToPinnedAddress(t *testing.T) {
-	if _, err := pinnedDialer(netip.MustParseAddr("127.0.0.1"))(context.Background(), "tcp", "missing-port"); err == nil {
+func TestMultiIPDialerConnectsToPinnedAddress(t *testing.T) {
+	if _, err := multiIPDialer([]netip.Addr{netip.MustParseAddr("127.0.0.1")})(context.Background(), "tcp", "missing-port"); err == nil {
 		t.Fatal("expected malformed address to be rejected")
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -261,13 +261,57 @@ func TestPinnedDialerConnectsToPinnedAddress(t *testing.T) {
 		accepted <- err
 	}()
 
-	conn, err := pinnedDialer(netip.MustParseAddr("127.0.0.1"))(context.Background(), "tcp", listener.Addr().String())
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	conn, err := multiIPDialer([]netip.Addr{netip.MustParseAddr("127.0.0.1")})(context.Background(), "tcp", net.JoinHostPort("127.0.0.1", port))
 	if err != nil {
 		t.Fatalf("pinned dial: %v", err)
 	}
 	conn.Close()
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept pinned dial: %v", err)
+	}
+}
+
+func TestMultiIPDialerFallsBackToNextAddress(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			conn.Close()
+		}
+		accepted <- err
+	}()
+
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	// 127.0.0.2 has nothing listening, so the kernel refuses the connection
+	// immediately (still loopback, no real network dependency); the dialer
+	// must then fall back to 127.0.0.1, where the test listener accepts.
+	ips := []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}
+	conn, err := multiIPDialer(ips)(context.Background(), "tcp", net.JoinHostPort("ignored.example", port))
+	if err != nil {
+		t.Fatalf("fallback dial: %v", err)
+	}
+	conn.Close()
+	if err := <-accepted; err != nil {
+		t.Fatalf("accept fallback dial: %v", err)
+	}
+}
+
+func TestMultiIPDialerReturnsLastErrorWhenAllAddressesFail(t *testing.T) {
+	ips := []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.3")}
+	if _, err := multiIPDialer(ips)(context.Background(), "tcp", "ignored.example:1"); err == nil {
+		t.Fatal("expected an error when every address refuses the connection")
 	}
 }
 

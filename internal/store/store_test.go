@@ -3,9 +3,11 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/KitsuneSemCalda/feader-rss/internal/feed"
@@ -147,6 +149,16 @@ func TestSQLiteBackupAndRestoreRoundTrip(t *testing.T) {
 			t.Errorf("backup unexpectedly has %s sidecar, stat err = %v", suffix, err)
 		}
 	}
+	if info, err := os.Stat(backupPath); err != nil {
+		t.Errorf("Stat backup: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("backup file permissions = %o, want 0600", perm)
+	}
+	if info, err := os.Stat(filepath.Dir(backupPath)); err != nil {
+		t.Errorf("Stat backup dir: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("backup dir permissions = %o, want 0700", perm)
+	}
 
 	target, err := Open(dbPath)
 	if err != nil {
@@ -193,6 +205,61 @@ func TestSQLiteBackupAndRestoreRoundTrip(t *testing.T) {
 	}
 	if !ok || content != "cached article" {
 		t.Fatalf("restored content = (%q, %v), want cached article", content, ok)
+	}
+	if info, err := os.Stat(dbPath); err != nil {
+		t.Errorf("Stat restored db: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("restored db permissions = %o, want 0600", perm)
+	}
+}
+
+func TestOpenRestrictsStateDirAndDatabasePermissions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("Chmod dir: %v", err)
+	}
+	dbPath := filepath.Join(dir, "items.db")
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if info, err := os.Stat(dir); err != nil {
+		t.Fatalf("Stat dir: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("state dir permissions = %o, want 0700", perm)
+	}
+	if info, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("Stat db: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("database file permissions = %o, want 0600", perm)
+	}
+}
+
+func TestRestrictDatabasePermissionsChmodsSidecarsAndIgnoresMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "items.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(base+suffix, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", suffix, err)
+		}
+	}
+	if err := restrictDatabasePermissions(base); err != nil {
+		t.Fatalf("restrictDatabasePermissions: %v", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(base + suffix)
+		if err != nil {
+			t.Fatalf("Stat %s: %v", suffix, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s permissions = %o, want 0600", suffix, perm)
+		}
+	}
+	if err := restrictDatabasePermissions(filepath.Join(dir, "missing.db")); err != nil {
+		t.Errorf("restrictDatabasePermissions on missing file: %v", err)
 	}
 }
 
@@ -337,6 +404,106 @@ func TestUpsertPreservesReadFlag(t *testing.T) {
 	}
 	if listed[0].Title != "Updated Title" {
 		t.Errorf("expected title to be updated, got %q", listed[0].Title)
+	}
+}
+
+func TestMigrateArticleIdentityRenamesLegacyRowsAndPreservesState(t *testing.T) {
+	s := openTestStore(t)
+	feedURL := "https://example.com/feed.xml"
+	legacyID := feed.LegacyArticleID("Old Name", "https://example.com/a")
+	newID := feed.ArticleID(feedURL, "https://example.com/a")
+	if legacyID == newID {
+		t.Fatal("test setup: legacy and new ids must differ")
+	}
+
+	if _, err := s.Upsert([]feed.Item{{
+		ID: legacyID, Feed: "Old Name", Title: "T", URL: "https://example.com/a", Published: "2024-01-01",
+	}}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.MarkRead(legacyID, true); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if err := s.SetStarred(legacyID, true); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	if err := s.SetTags(legacyID, []string{"favorite"}); err != nil {
+		t.Fatalf("SetTags: %v", err)
+	}
+
+	migrated, err := s.MigrateArticleIdentity(map[string]string{"Old Name": feedURL})
+	if err != nil {
+		t.Fatalf("MigrateArticleIdentity: %v", err)
+	}
+	if migrated != 1 {
+		t.Fatalf("migrated = %d, want 1", migrated)
+	}
+
+	listed, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 article, got %d", len(listed))
+	}
+	item := listed[0]
+	if item.ID != newID {
+		t.Errorf("id = %q, want %q", item.ID, newID)
+	}
+	if !item.Read || !item.Starred || len(item.Tags) != 1 || item.Tags[0] != "favorite" {
+		t.Errorf("migration lost article state: %+v", item)
+	}
+
+	// Re-running the migration is a no-op: the row is already on the new scheme.
+	migrated, err = s.MigrateArticleIdentity(map[string]string{"Old Name": feedURL})
+	if err != nil {
+		t.Fatalf("MigrateArticleIdentity (second run): %v", err)
+	}
+	if migrated != 0 {
+		t.Errorf("expected no further migration, got %d", migrated)
+	}
+}
+
+func TestMigrateArticleIdentityIgnoresUnconfiguredFeedsAndCollisions(t *testing.T) {
+	s := openTestStore(t)
+	legacyID := feed.LegacyArticleID("Removed Feed", "https://example.com/a")
+	if _, err := s.Upsert([]feed.Item{{
+		ID: legacyID, Feed: "Removed Feed", Title: "T", URL: "https://example.com/a", Published: "2024-01-01",
+	}}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// No URL known for "Removed Feed": nothing to migrate to, row stays put.
+	if migrated, err := s.MigrateArticleIdentity(map[string]string{"Other Feed": "https://example.com/other.xml"}); err != nil {
+		t.Fatalf("MigrateArticleIdentity: %v", err)
+	} else if migrated != 0 {
+		t.Errorf("migrated = %d, want 0 for an unconfigured feed", migrated)
+	}
+	if migrated, err := s.MigrateArticleIdentity(nil); err != nil || migrated != 0 {
+		t.Errorf("MigrateArticleIdentity(nil) = (%d, %v), want (0, nil)", migrated, err)
+	}
+
+	listed, err := s.List(0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != legacyID {
+		t.Fatalf("expected legacy id untouched, got %+v", listed)
+	}
+
+	// A row already sitting at the target id blocks the rename instead of
+	// clobbering it.
+	feedURL := "https://example.com/feed.xml"
+	collidingID := feed.ArticleID(feedURL, "https://example.com/a")
+	if _, err := s.Upsert([]feed.Item{{
+		ID: collidingID, Feed: "Removed Feed", Title: "Existing", URL: "https://example.com/other", Published: "2024-01-02",
+	}}); err != nil {
+		t.Fatalf("Upsert colliding row: %v", err)
+	}
+	if migrated, err := s.MigrateArticleIdentity(map[string]string{"Removed Feed": feedURL}); err != nil {
+		t.Fatalf("MigrateArticleIdentity: %v", err)
+	} else if migrated != 0 {
+		t.Errorf("migrated = %d, want 0 when the target id is already taken", migrated)
 	}
 }
 
@@ -659,6 +826,98 @@ func TestUnreadCountsCanBeScopedToConfiguredFeeds(t *testing.T) {
 	}
 	if unread != 2 || feeds != 2 {
 		t.Fatalf("global unread = (%d, %d), want (2, 2)", unread, feeds)
+	}
+}
+
+// TestConcurrentMultiConnectionAccessDoesNotFailOrCorrupt mirrors how the
+// real plugin uses the database: every CLI invocation (fetch, mark-read,
+// star, set-tags, list, search) opens its own short-lived connection against
+// the same on-disk file, and several of these can legitimately overlap (a
+// background refresh while the user marks an article read or stars it). WAL
+// mode plus a generous busy_timeout should absorb that contention rather
+// than surfacing "database is locked" errors or losing an update.
+func TestConcurrentMultiConnectionAccessDoesNotFailOrCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "items.db")
+
+	seed, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open seed: %v", err)
+	}
+	const n = 30
+	items := make([]feed.Item, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, feed.Item{
+			ID:        fmt.Sprintf("concurrent-%02d", i),
+			Feed:      "Feed",
+			Title:     fmt.Sprintf("Concurrent Title %d", i),
+			URL:       fmt.Sprintf("https://example.test/concurrent/%d", i),
+			Published: "2024-01-01",
+		})
+	}
+	if _, err := seed.Upsert(items); err != nil {
+		seed.Close()
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, n*3)
+	withStore := func(op func(*Store) error) {
+		defer wg.Done()
+		s, err := Open(dbPath)
+		if err != nil {
+			errCh <- fmt.Errorf("open: %w", err)
+			return
+		}
+		defer s.Close()
+		if err := op(s); err != nil {
+			errCh <- err
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		id := items[i].ID
+
+		wg.Add(3)
+		go withStore(func(s *Store) error { return s.MarkRead(id, true) })
+		go withStore(func(s *Store) error { return s.SetStarred(id, true) })
+		go withStore(func(s *Store) error {
+			_, err := s.List(0)
+			return err
+		})
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent access error: %v", err)
+	}
+
+	final, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open final: %v", err)
+	}
+	defer final.Close()
+	listed, err := final.List(0)
+	if err != nil {
+		t.Fatalf("List final: %v", err)
+	}
+	if len(listed) != n {
+		t.Fatalf("expected %d articles to survive concurrent access, got %d", n, len(listed))
+	}
+	for _, item := range listed {
+		if !item.Read || !item.Starred {
+			t.Errorf("article %s = read:%v starred:%v, want both true", item.ID, item.Read, item.Starred)
+		}
+	}
+	results, err := final.Search("Concurrent", 0)
+	if err != nil {
+		t.Fatalf("Search final: %v", err)
+	}
+	if len(results) != n {
+		t.Errorf("FTS index inconsistent after concurrent writes: got %d results, want %d", len(results), n)
 	}
 }
 
