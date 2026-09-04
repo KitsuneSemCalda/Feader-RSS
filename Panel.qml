@@ -1368,13 +1368,16 @@ Panel {
             delegate: Text {
               required property var modelData
               width: parent.width
+              // Feed failures come from server-controlled response fields.
+              // Keep this explicit on the same delegate as the remote binding:
+              // markup such as <img> must only ever be displayed as text.
+              textFormat: Text.PlainText
               text: String(modelData.name || modelData.feed || modelData.url || "Feed")
                 + ": " + String(modelData.error || modelData.message || "failed to refresh")
               color: Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
             }
           }
         }

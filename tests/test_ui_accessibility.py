@@ -266,6 +266,18 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("root.feedErrors.length > 0", PANEL)
         self.assertIn("Color.urgent", PANEL)
 
+    def test_feed_error_server_fields_are_rendered_as_plain_text(self):
+        match = re.search(
+            r"model: root\.feedErrors\s+delegate: Text \{(?P<delegate>.*?)\n {12}\}\n {10}\}",
+            PANEL,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        delegate = match.group("delegate")
+        self.assertIn("textFormat: Text.PlainText", delegate)
+        for field in ("modelData.name", "modelData.error", "modelData.message"):
+            self.assertIn(field, delegate)
+
     def test_search_field_does_not_reset_while_typing(self):
         self.assertIn("id: searchField", PANEL)
         self.assertIn("onTextChanged: root.setSearchQuery(text)", PANEL)
