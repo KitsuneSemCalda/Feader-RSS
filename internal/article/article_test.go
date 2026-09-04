@@ -55,6 +55,51 @@ func TestExtract(t *testing.T) {
 	}
 }
 
+func TestExtractSkipsNoscriptContent(t *testing.T) {
+	// golang.org/x/net/html parses <noscript> the way a scripting-enabled
+	// browser does: its entire content — including tracking-pixel <img>
+	// tags and lazy-load <style> fallbacks, both common on real sites — is
+	// a single literal text node, never real child elements. Regression for
+	// that raw markup leaking straight into the extracted article text.
+	page := `<html><body>
+		<p>Visible paragraph.</p>
+		<noscript><img src="https://example.com/pixel.gif"><style id="lazyload">.x{display:none}</style></noscript>
+		<p>Another visible paragraph.</p>
+	</body></html>`
+	_, content, err := Extract(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if strings.Contains(content, "<img") || strings.Contains(content, "<style") || strings.Contains(content, "display:none") {
+		t.Errorf("noscript markup leaked into output: %q", content)
+	}
+	if !strings.Contains(content, "Visible paragraph.") || !strings.Contains(content, "Another visible paragraph.") {
+		t.Errorf("expected surrounding paragraphs to survive, got: %q", content)
+	}
+}
+
+func TestExtractSkipsTemplateContent(t *testing.T) {
+	// <template> content is real child elements to the parser, but it is
+	// inert by spec (never rendered unless cloned by script) — commonly a
+	// hidden modal, cookie banner, or lazy-loaded component — so it should
+	// not appear in the article any more than a <script> would.
+	page := `<html><body>
+		<p>Visible paragraph.</p>
+		<template><p>Hidden template content.</p></template>
+		<p>Another visible paragraph.</p>
+	</body></html>`
+	_, content, err := Extract(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if strings.Contains(content, "Hidden template content") {
+		t.Errorf("template content leaked into output: %q", content)
+	}
+	if !strings.Contains(content, "Visible paragraph.") || !strings.Contains(content, "Another visible paragraph.") {
+		t.Errorf("expected surrounding paragraphs to survive, got: %q", content)
+	}
+}
+
 func TestExtractFallsBackToFirstLineWhenNoTitleTag(t *testing.T) {
 	title, _, err := Extract(strings.NewReader(`<html><body><p>Just a paragraph.</p></body></html>`))
 	if err != nil {

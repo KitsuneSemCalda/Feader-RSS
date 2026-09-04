@@ -32,6 +32,40 @@ func TestImportPreservesFoldersAndSkipsDuplicateURLs(t *testing.T) {
 	}
 }
 
+func TestImportSkipsNonHTTPFeedURLs(t *testing.T) {
+	input := `<opml><body>
+<outline text="File" xmlUrl="file:///etc/passwd" />
+<outline text="FTP" xmlUrl="ftp://example.test/feed" />
+<outline text="Malformed" xmlUrl="ht!tp://bad" />
+<outline text="Hostless" xmlUrl="https:///no-host" />
+<outline text="Good" xmlUrl="https://example.test/feed" />
+</body></opml>`
+
+	feeds, err := Import(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(feeds) != 1 || feeds[0].URL != "https://example.test/feed" {
+		t.Fatalf("feeds = %+v, want only the http(s) feed", feeds)
+	}
+}
+
+func TestTruncateCapsAtMaxFeedsAndReportsDrops(t *testing.T) {
+	feeds := make([]Feed, 0, MaxFeeds+3)
+	for i := 0; i < MaxFeeds+3; i++ {
+		feeds = append(feeds, Feed{Name: "Feed", URL: "https://example.test/feed"})
+	}
+	kept, truncated := Truncate(feeds)
+	if len(kept) != MaxFeeds || !truncated {
+		t.Fatalf("Truncate = (%d feeds, truncated=%v), want (%d, true)", len(kept), truncated, MaxFeeds)
+	}
+
+	kept, truncated = Truncate(feeds[:MaxFeeds])
+	if len(kept) != MaxFeeds || truncated {
+		t.Fatalf("Truncate at the limit = (%d feeds, truncated=%v), want (%d, false)", len(kept), truncated, MaxFeeds)
+	}
+}
+
 func TestExportGroupsFolders(t *testing.T) {
 	var output bytes.Buffer
 	err := Export(&output, []Feed{

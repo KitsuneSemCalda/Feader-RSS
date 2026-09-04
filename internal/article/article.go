@@ -32,6 +32,18 @@ var blockTags = map[string]bool{
 var skipTags = map[string]bool{
 	"aside": true, "footer": true, "form": true, "header": true,
 	"nav": true, "script": true, "style": true, "svg": true,
+	// golang.org/x/net/html parses <noscript> the way a scripting-enabled
+	// browser does: its entire content is one literal text node (raw tag
+	// syntax included, e.g. tracking-pixel <img> or lazy-load <style>
+	// fallbacks), never real child elements. Without this, that markup
+	// leaks straight into the extracted text instead of being discarded.
+	"noscript": true,
+	// <template> content is real, ordinary child elements as far as the
+	// parser is concerned, but it is inert by spec — never rendered unless
+	// cloned by script — so it must be skipped the same way, or its text
+	// (often a hidden modal, cookie banner, or lazy-loaded component)
+	// appears in the article as if it were visible body content.
+	"template": true,
 }
 
 var (

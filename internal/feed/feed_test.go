@@ -48,7 +48,7 @@ const atomSample = `<?xml version="1.0" encoding="utf-8"?>
 </feed>`
 
 func TestParseRSS(t *testing.T) {
-	items, err := Parse("Sample", []byte(rssSample))
+	items, err := Parse("Sample", "https://example.com/feed.xml", []byte(rssSample))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -77,17 +77,22 @@ func TestParseRSS(t *testing.T) {
 	if item.PublishedAt == 0 {
 		t.Error("expected RSS publication timestamp")
 	}
-	wantID := articleID("Sample", "https://example.com/a")
+	wantID := ArticleID("https://example.com/feed.xml", "https://example.com/a")
 	if item.ID != wantID {
 		t.Errorf("id = %q, want %q", item.ID, wantID)
 	}
 	if len(item.ID) != 24 {
 		t.Errorf("id length = %d, want 24", len(item.ID))
 	}
+	if renamedID, err := Parse("Renamed", "https://example.com/feed.xml", []byte(rssSample)); err != nil {
+		t.Fatalf("Parse renamed: %v", err)
+	} else if renamedID[0].ID != wantID {
+		t.Errorf("id changed after renaming the feed: %q, want %q", renamedID[0].ID, wantID)
+	}
 }
 
 func TestParseAtom(t *testing.T) {
-	items, err := Parse("Sample", []byte(atomSample))
+	items, err := Parse("Sample", "https://example.com/feed.atom", []byte(atomSample))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -119,14 +124,14 @@ func TestParseAtom(t *testing.T) {
 }
 
 func TestParseUnsupportedFormat(t *testing.T) {
-	_, err := Parse("Sample", []byte(`<html><body>not a feed</body></html>`))
+	_, err := Parse("Sample", "https://example.test/feed", []byte(`<html><body>not a feed</body></html>`))
 	if err == nil {
 		t.Fatal("expected error for unsupported root element")
 	}
 }
 
 func TestParseInvalidXML(t *testing.T) {
-	_, err := Parse("Sample", []byte(`not xml at all`))
+	_, err := Parse("Sample", "https://example.test/feed", []byte(`not xml at all`))
 	if err == nil {
 		t.Fatal("expected error for invalid XML")
 	}
@@ -139,7 +144,7 @@ func TestSummaryTruncation(t *testing.T) {
 		<link>https://example.com/long</link>
 		<description>` + longDesc + `</description>
 	</item></channel></rss>`
-	items, err := Parse("Sample", []byte(xmlDoc))
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -154,7 +159,7 @@ func TestSummaryCleaningSkipsScriptsAndKeepsParagraphs(t *testing.T) {
 		<link>https://example.com/clean</link>
 		<description><![CDATA[<p>First paragraph.</p><script>secret()</script><p>Second paragraph.</p>]]></description>
 	</item></channel></rss>`
-	items, err := Parse("Sample", []byte(xmlDoc))
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -169,13 +174,55 @@ func TestSummaryCleaningSkipsScriptsAndKeepsParagraphs(t *testing.T) {
 	}
 }
 
+func TestSummaryCleaningSkipsNoscriptContent(t *testing.T) {
+	// See the matching regression in internal/article: golang.org/x/net/html
+	// hands back a <noscript> element's entire content (tracking-pixel <img>
+	// tags, lazy-load <style> fallbacks) as one literal text node, which
+	// leaks raw markup into the summary unless explicitly skipped.
+	xmlDoc := `<rss version="2.0"><channel><item>
+		<title>Noscript</title>
+		<link>https://example.com/noscript</link>
+		<description><![CDATA[<p>Visible.</p><noscript><img src="https://example.com/pixel.gif"><style>.x{display:none}</style></noscript>]]></description>
+	</item></channel></rss>`
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	summary := items[0].Summary
+	if strings.Contains(summary, "<img") || strings.Contains(summary, "<style") || strings.Contains(summary, "display:none") {
+		t.Errorf("noscript markup leaked into summary: %q", summary)
+	}
+	if !strings.Contains(summary, "Visible.") {
+		t.Errorf("expected visible text to survive, got: %q", summary)
+	}
+}
+
+func TestSummaryCleaningSkipsTemplateContent(t *testing.T) {
+	xmlDoc := `<rss version="2.0"><channel><item>
+		<title>Template</title>
+		<link>https://example.com/template</link>
+		<description><![CDATA[<p>Visible.</p><template><p>Hidden template content.</p></template>]]></description>
+	</item></channel></rss>`
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	summary := items[0].Summary
+	if strings.Contains(summary, "Hidden template content") {
+		t.Errorf("template content leaked into summary: %q", summary)
+	}
+	if !strings.Contains(summary, "Visible.") {
+		t.Errorf("expected visible text to survive, got: %q", summary)
+	}
+}
+
 func TestRSSPrefersEncodedContentWhenAvailable(t *testing.T) {
 	xmlDoc := `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
 		<title>Rich content</title><link>https://example.com/rich</link>
 		<description>Short description</description>
 		<content:encoded><![CDATA[<p>Fuller content with <b>formatting</b>.</p>]]></content:encoded>
 	</item></channel></rss>`
-	items, err := Parse("Sample", []byte(xmlDoc))
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -190,7 +237,7 @@ func TestSummaryTruncationPreservesUTF8(t *testing.T) {
 		<title>Unicode</title><link>https://example.com/unicode</link>
 		<description>` + longDesc + `</description>
 	</item></channel></rss>`
-	items, err := Parse("Sample", []byte(xmlDoc))
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -213,6 +260,33 @@ func TestParseResolvesRelativeLinks(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].URL != "https://example.com/story/one" {
 		t.Fatalf("resolved URL = %#v", items)
+	}
+}
+
+func TestResolveLinkCanonicalizesSchemeHostPortAndFragment(t *testing.T) {
+	base, err := url.Parse("https://example.com/feed.xml")
+	if err != nil {
+		t.Fatalf("parse base: %v", err)
+	}
+	cases := []struct {
+		name string
+		link string
+		want string
+	}{
+		{"lowercases scheme and host", "HTTPS://Example.COM/Path", "https://example.com/Path"},
+		{"drops default https port", "https://example.com:443/x", "https://example.com/x"},
+		{"drops default http port", "http://example.com:80/x", "http://example.com/x"},
+		{"keeps a non-default port", "https://example.com:8443/x", "https://example.com:8443/x"},
+		{"keeps a non-default port for http", "http://example.com:443/x", "http://example.com:443/x"},
+		{"drops the fragment", "https://example.com/x?q=1#section", "https://example.com/x?q=1"},
+		{"preserves path and query case exactly", "https://example.com/Path?Query=Value", "https://example.com/Path?Query=Value"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveLink(c.link, base); got != c.want {
+				t.Errorf("resolveLink(%q) = %q, want %q", c.link, got, c.want)
+			}
+		})
 	}
 }
 
@@ -287,7 +361,7 @@ func TestParseSkipsEntriesWithoutTitleOrLink(t *testing.T) {
 		<item><title></title><link>https://example.test/no-title</link></item>
 		<item><title>No URL</title><link></link></item>
 	</channel></rss>`
-	items, err := Parse("Sample", []byte(xmlDoc))
+	items, err := Parse("Sample", "https://example.test/feed", []byte(xmlDoc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -296,7 +370,7 @@ func TestParseSkipsEntriesWithoutTitleOrLink(t *testing.T) {
 	}
 
 	atomDoc := `<feed xmlns="http://www.w3.org/2005/Atom"><entry><title></title><link href="https://example.test/no-title"/></entry><entry><title>No URL</title></entry></feed>`
-	items, err = Parse("Atom", []byte(atomDoc))
+	items, err = Parse("Atom", "https://example.test/feed.atom", []byte(atomDoc))
 	if err != nil {
 		t.Fatalf("Parse Atom: %v", err)
 	}

@@ -7,14 +7,38 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 )
+
+// MaxFeeds is the maximum number of feeds Feader supports configuring at
+// once, matching the limit the Quickshell settings UI enforces when a feed
+// is added by hand.
+const MaxFeeds = 8
 
 // Feed is the portable subset of a Feader feed configuration.
 type Feed struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
 	Folder string `json:"folder,omitempty"`
+}
+
+// Truncate caps feeds at MaxFeeds, reporting whether any were dropped. It
+// keeps the first MaxFeeds entries so earlier feeds (e.g. those already
+// configured, when merging) are preserved over later ones.
+func Truncate(feeds []Feed) ([]Feed, bool) {
+	if len(feeds) <= MaxFeeds {
+		return feeds, false
+	}
+	return feeds[:MaxFeeds], true
+}
+
+func isValidFeedURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 type document struct {
@@ -57,16 +81,19 @@ func Import(r io.Reader) ([]Feed, error) {
 	var walk func([]outline, string)
 	walk = func(outlines []outline, folder string) {
 		for _, item := range outlines {
-			url := strings.TrimSpace(item.XMLURL)
-			if url != "" {
-				key := strings.ToLower(strings.TrimRight(url, "/"))
+			feedURL := strings.TrimSpace(item.XMLURL)
+			if feedURL != "" {
+				if !isValidFeedURL(feedURL) {
+					continue // not an http(s) URL; skip rather than configure a feed that can never be fetched
+				}
+				key := strings.ToLower(strings.TrimRight(feedURL, "/"))
 				if !seen[key] {
 					seen[key] = true
 					name := strings.TrimSpace(item.Title)
 					if name == "" {
 						name = strings.TrimSpace(item.Text)
 					}
-					feeds = append(feeds, Feed{Name: name, URL: url, Folder: folder})
+					feeds = append(feeds, Feed{Name: name, URL: feedURL, Folder: folder})
 				}
 				continue
 			}

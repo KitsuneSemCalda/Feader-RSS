@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -248,6 +249,65 @@ func TestCLIFetchUsesFeedBoundaryAndReportsErrors(t *testing.T) {
 	}
 }
 
+func TestCLIFetchMigratesLegacyIDsAndSurvivesFeedRename(t *testing.T) {
+	oldFetcher := fetchFeedWithRetry
+	t.Cleanup(func() { fetchFeedWithRetry = oldFetcher })
+	feedURL := "https://good.test/feed"
+	articleURL := "https://good.test/article"
+	currentID := feed.ArticleID(feedURL, articleURL)
+	fetchFeedWithRetry = func(name, rawURL string, attempts int, backoff time.Duration) ([]feed.Item, error) {
+		return []feed.Item{{
+			ID: feed.ArticleID(rawURL, articleURL), Feed: name, Title: "Fetched", URL: articleURL,
+		}}, nil
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "fetch.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open seed database: %v", err)
+	}
+	legacyID := feed.LegacyArticleID("Tech News", articleURL)
+	if _, err := db.Upsert([]feed.Item{{ID: legacyID, Feed: "Tech News", Title: "Old Title", URL: articleURL}}); err != nil {
+		db.Close()
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	if err := db.MarkRead(legacyID, true); err != nil {
+		db.Close()
+		t.Fatalf("seed MarkRead: %v", err)
+	}
+	db.Close()
+
+	stdout, _, code := captureCLI(t, func() int {
+		return run([]string{"fetch", "--db", dbPath, "Tech News", feedURL})
+	})
+	if code != 0 {
+		t.Fatalf("fetch: code=%d stdout=%q", code, stdout)
+	}
+	var result snapshot
+	decodeCLIJSON(t, stdout, &result)
+	if len(result.Items) != 1 || len(result.NewItems) != 0 {
+		t.Fatalf("expected the legacy row to be recognized, not reported new: %+v", result)
+	}
+	if result.Items[0].ID != currentID || !result.Items[0].Read {
+		t.Fatalf("migrated item = %+v, want id %q and read=true", result.Items[0], currentID)
+	}
+
+	// Renaming the feed (same URL) must not orphan the article a second time.
+	stdout, _, code = captureCLI(t, func() int {
+		return run([]string{"fetch", "--db", dbPath, "Tech News Renamed", feedURL})
+	})
+	if code != 0 {
+		t.Fatalf("fetch after rename: code=%d stdout=%q", code, stdout)
+	}
+	decodeCLIJSON(t, stdout, &result)
+	if len(result.Items) != 1 || len(result.NewItems) != 0 {
+		t.Fatalf("rename produced a duplicate/new item: %+v", result)
+	}
+	if result.Items[0].ID != currentID || !result.Items[0].Read || result.Items[0].Feed != "Tech News Renamed" {
+		t.Fatalf("post-rename item = %+v", result.Items[0])
+	}
+}
+
 func TestCLIArticleServesCacheFetchesAndReportsFailures(t *testing.T) {
 	dbPath, items := seedCLIDB(t)
 	db, err := store.Open(dbPath)
@@ -462,6 +522,23 @@ func TestCLIOPMLExportImportAndConfigHelpers(t *testing.T) {
 	})
 	if code != 1 || stderr == "" {
 		t.Fatalf("invalid OPML import: code=%d stderr=%q", code, stderr)
+	}
+
+	var manyOutlines strings.Builder
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&manyOutlines, `<outline text="Feed %d" xmlUrl="https://many.test/feed%d"/>`, i, i)
+	}
+	manyOPML := writeCLIFile(t, "many.opml", `<?xml version="1.0"?><opml version="2.0"><body>`+manyOutlines.String()+`</body></opml>`)
+	manyConfig := filepath.Join(t.TempDir(), "many-config.json")
+	stdout, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", manyConfig, "--input", manyOPML})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("OPML import over the feed limit: code=%d stderr=%q", code, stderr)
+	}
+	decodeCLIJSON(t, stdout, &importResult)
+	if importResult["imported"] != float64(10) || importResult["total"] != float64(opml.MaxFeeds) || importResult["truncated"] != true {
+		t.Fatalf("OPML over-limit result = %#v", importResult)
 	}
 
 	merged := mergeOPMLFeeds(

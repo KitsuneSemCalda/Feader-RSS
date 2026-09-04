@@ -215,6 +215,7 @@ func cmdOPMLImport(args []string) int {
 	if *merge {
 		feeds = mergeOPMLFeeds(current, feeds)
 	}
+	feeds, truncated := opml.Truncate(feeds)
 	encodedFeeds, err := json.Marshal(feeds)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -226,10 +227,11 @@ func cmdOPMLImport(args []string) int {
 		return 1
 	}
 	return printJSON(map[string]interface{}{
-		"imported": importedCount,
-		"total":    len(feeds),
-		"merged":   *merge,
-		"config":   *configPath,
+		"imported":  importedCount,
+		"total":     len(feeds),
+		"merged":    *merge,
+		"truncated": truncated,
+		"config":    *configPath,
 	})
 }
 
@@ -339,9 +341,11 @@ func cmdFetch(args []string) int {
 	var fetched []feed.Item
 	var errs []feedError
 	feedNames := make([]string, 0, len(feedArgs)/2)
+	feedURLs := make(map[string]string, len(feedArgs)/2)
 	for i := 0; i+1 < len(feedArgs); i += 2 {
 		name, url := feedArgs[i], feedArgs[i+1]
 		feedNames = append(feedNames, name)
+		feedURLs[name] = url
 		items, err := fetchFeedWithRetry(name, url, *attempts, *backoff)
 		if err != nil {
 			errs = append(errs, feedError{Feed: name, URL: url, Error: err.Error()})
@@ -357,6 +361,11 @@ func cmdFetch(args []string) int {
 		return 1
 	}
 	defer db.Close()
+
+	if _, err := db.MigrateArticleIdentity(feedURLs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 
 	newItems, err := db.Upsert(fetched)
 	if err != nil {

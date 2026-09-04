@@ -8,6 +8,7 @@ import (
 	"fmt"
 	stdhtml "html"
 	"io"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -114,6 +115,14 @@ var summarySkipTags = map[string]bool{
 	"aside": true, "canvas": true, "footer": true, "form": true,
 	"header": true, "nav": true, "script": true, "style": true,
 	"svg": true,
+	// See the matching comments in internal/article: golang.org/x/net/html
+	// parses <noscript> content as one literal text node (raw tag syntax
+	// included), so it must be skipped explicitly or it leaks into the
+	// summary verbatim; <template> content is real child elements but is
+	// inert by spec (never rendered unless cloned by script) and must be
+	// skipped the same way.
+	"noscript": true,
+	"template": true,
 }
 
 var get = safefetch.Get
@@ -259,7 +268,35 @@ func resolveLink(raw string, base *url.URL) string {
 	if err != nil {
 		return link
 	}
-	return base.ResolveReference(parsed).String()
+	return canonicalizeURL(base.ResolveReference(parsed)).String()
+}
+
+// canonicalizeURL applies only the equivalences the URL spec itself
+// guarantees never change what a request fetches: lowercasing the
+// case-insensitive scheme and host, dropping a port that matches the
+// scheme's own default, and dropping the fragment (never sent to the
+// server). The path and query — where a real difference in meaning is
+// possible — are left exactly as the publisher wrote them.
+func canonicalizeURL(u *url.URL) *url.URL {
+	out := *u
+	out.Scheme = strings.ToLower(out.Scheme)
+	if host, port, err := net.SplitHostPort(out.Host); err == nil {
+		host = strings.ToLower(host)
+		if isDefaultPort(out.Scheme, port) {
+			out.Host = host
+		} else {
+			out.Host = net.JoinHostPort(host, port)
+		}
+	} else {
+		out.Host = strings.ToLower(out.Host)
+	}
+	out.Fragment = ""
+	out.RawFragment = ""
+	return &out
+}
+
+func isDefaultPort(scheme, port string) bool {
+	return (scheme == "http" && port == "80") || (scheme == "https" && port == "443")
 }
 
 func atomAuthorName(authors []atomAuthor) string {
@@ -274,15 +311,45 @@ func atomAuthorName(authors []atomAuthor) string {
 	return ""
 }
 
-func articleID(feedName, link string) string {
-	sum := sha256.Sum256([]byte(feedName + "\x00" + link))
+func articleID(identity, link string) string {
+	sum := sha256.Sum256([]byte(identity + "\x00" + link))
 	return hex.EncodeToString(sum[:])[:24]
 }
 
+// ArticleID returns the stable identifier for an article whose feed has the
+// given canonical URL. Renaming a feed's editable display name never changes
+// this value, since the URL — not the name — is the identity component.
+func ArticleID(feedURL, link string) string {
+	return articleID(feedURL, link)
+}
+
+// LegacyArticleID reproduces the article identifier scheme used before
+// feeds carried a stable URL-based identity: it was keyed on the feed's
+// editable display name instead. Store migrations use it to recognize
+// rows that still need to move to the current, rename-safe scheme (see
+// Store.MigrateArticleIdentity).
+func LegacyArticleID(feedName, link string) string {
+	return articleID(feedName, link)
+}
+
+// feedIdentity picks the component that goes into an article's id: the
+// feed's own URL when known, falling back to its display name only when no
+// URL is available (matching the legacy scheme).
+func feedIdentity(name string, base *url.URL) string {
+	if base != nil {
+		return base.String()
+	}
+	return name
+}
+
 // Parse decodes RSS 2.0 or Atom XML, returning normalized items. It
-// autodetects the format from the root element.
-func Parse(name string, data []byte) ([]Item, error) {
-	return parse(name, data, nil)
+// autodetects the format from the root element. feedURL is the feed's own
+// address; it is used both to resolve relative article links and, since it
+// rarely changes, as the stable per-feed identity component of each
+// article's id — unlike the editable display name in name.
+func Parse(name, feedURL string, data []byte) ([]Item, error) {
+	base, _ := url.Parse(feedURL)
+	return parse(name, data, base)
 }
 
 func parse(name string, data []byte, base *url.URL) ([]Item, error) {
@@ -321,6 +388,7 @@ func parseRSS(name string, data []byte, base *url.URL) ([]Item, error) {
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("invalid RSS: %w", err)
 	}
+	identity := feedIdentity(name, base)
 	items := make([]Item, 0, len(doc.Channel.Items))
 	for _, it := range doc.Channel.Items {
 		title := clean(firstNonEmpty(it.Title))
@@ -330,7 +398,7 @@ func parseRSS(name string, data []byte, base *url.URL) ([]Item, error) {
 		}
 		published := firstNonEmpty(it.PubDate)
 		items = append(items, Item{
-			ID:          articleID(name, link),
+			ID:          articleID(identity, link),
 			Title:       title,
 			URL:         link,
 			Feed:        name,
@@ -350,6 +418,7 @@ func parseAtom(name string, data []byte, base *url.URL) ([]Item, error) {
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("invalid Atom: %w", err)
 	}
+	identity := feedIdentity(name, base)
 	items := make([]Item, 0, len(doc.Entries))
 	for _, entry := range doc.Entries {
 		title := clean(firstNonEmpty(entry.Title))
@@ -363,7 +432,7 @@ func parseAtom(name string, data []byte, base *url.URL) ([]Item, error) {
 			categories = append(categories, category.Term)
 		}
 		items = append(items, Item{
-			ID:          articleID(name, link),
+			ID:          articleID(identity, link),
 			Title:       title,
 			URL:         link,
 			Feed:        name,
