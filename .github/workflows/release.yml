@@ -29,6 +29,15 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Verify manifest version matches the release tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")"
+          if [ "${tag_version}" != "${manifest_version}" ]; then
+            echo "manifest.json version (${manifest_version}) does not match release tag (${GITHUB_REF_NAME})" >&2
+            exit 1
+          fi
+
       - name: Validate plugin
         run: |
           python -m json.tool manifest.json >/dev/null

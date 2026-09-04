@@ -40,7 +40,13 @@ is_local_checkout() {
   [[ -e "${plugin_root}/.git" ]]
 }
 
+release_workflow="${repo}/.github/workflows/release.yml"
+
+# build_local and fetch_binary each install the binary into the given staging
+# directory rather than the live destination, so a failure here never leaves
+# the installed plugin without a working binary (see the atomic swap below).
 build_local() {
+  local target_dir="$1"
   local tmp_dir out_path
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "${tmp_dir}"' RETURN
@@ -52,10 +58,11 @@ build_local() {
     return 1
   fi
 
-  install -m 0755 "${out_path}" "${destination}/${binary_name}"
+  install -m 0755 "${out_path}" "${target_dir}/${binary_name}"
 }
 
 fetch_binary() {
+  local target_dir="$1"
   local platform asset_name url checksums_url tmp_dir asset_path checksums_path expected actual
 
   if ! command -v gh >/dev/null 2>&1; then
@@ -99,15 +106,21 @@ fetch_binary() {
   printf '%s\n' "Checksum verified."
 
   printf '%s\n' "Verifying build provenance attestation..."
-  if ! gh attestation verify "${asset_path}" --repo "${repo}" >/dev/null; then
+  # Pin verification to the exact workflow file that is allowed to sign a
+  # release binary and to the tag it must have been built from, instead of
+  # only the repository — a checksum and a same-repo attestation are not
+  # enough on their own if any other workflow in the repo could also sign.
+  if ! gh attestation verify "${asset_path}" --repo "${repo}" \
+      --signer-workflow "${release_workflow}" \
+      --source-ref "refs/tags/v${version}" >/dev/null; then
     printf '%s\n' "Error: build provenance attestation verification failed for ${asset_name}." >&2
-    printf '%s\n' "Refusing to install a binary that cannot be verified as built by ${repo}'s release workflow from a signed commit." >&2
+    printf '%s\n' "Refusing to install a binary that cannot be verified as built by ${release_workflow} from tag v${version}." >&2
     exit 1
   fi
-  printf '%s\n' "Provenance verified: binary was built by ${repo}'s release workflow."
+  printf '%s\n' "Provenance verified: binary was built by ${release_workflow} from tag v${version}."
 
   chmod +x "${asset_path}"
-  install -m 0755 "${asset_path}" "${destination}/${binary_name}"
+  install -m 0755 "${asset_path}" "${target_dir}/${binary_name}"
 }
 
 printf '%s\n' "Validating the plugin..."
@@ -125,37 +138,65 @@ if [[ -L "${destination}" ]]; then
   exit 1
 fi
 
-mkdir -p "${destination}"
+destination_parent="$(dirname -- "${destination}")"
+mkdir -p "${destination_parent}"
 
-# Remove only files owned by this plugin before copying the new version. Keep
-# .git, the user feed configuration, and the persisted article state untouched.
-for file in manifest.json BarWidget.qml Panel.qml README.md example-config.json "${binary_name}" rss-fetch.py; do
-  rm -f "${destination}/${file}"
-done
-rm -rf "${destination}/src" "${destination}/scripts"
+# Assemble the full plugin — manifest, QML, and the fetch binary — in a
+# staging directory first, and only touch the live plugin directory once
+# every piece is built/downloaded and verified. This keeps a failed
+# build/download/attestation check from ever leaving the live plugin without
+# a working binary: until this point, ${destination} is never modified.
+staging_dir="$(mktemp -d "${destination_parent}/.feader-rss-staging.XXXXXX")"
+cleanup_staging() { rm -rf -- "${staging_dir}"; }
+trap cleanup_staging EXIT
 
-# Keep the installed checkout limited to the plugin contract. The fetch/parse
-# backend is a compiled Go binary, downloaded from the matching GitHub
-# release rather than shipped in the plugin source tree.
 install -m 0644 \
   "${plugin_root}/manifest.json" \
   "${plugin_root}/BarWidget.qml" \
   "${plugin_root}/Panel.qml" \
   "${plugin_root}/README.md" \
   "${plugin_root}/example-config.json" \
-  "${destination}/"
+  "${staging_dir}/"
 
 if is_local_checkout && command -v go >/dev/null 2>&1; then
-  if ! build_local; then
-    printf '%s\n' "Falling back to downloading a prebuilt release binary..." >&2
-    fetch_binary
+  if ! build_local "${staging_dir}"; then
+    if [[ "${FEADER_RSS_ALLOW_REMOTE_FALLBACK:-}" == "1" ]]; then
+      printf '%s\n' "Local build failed; FEADER_RSS_ALLOW_REMOTE_FALLBACK=1 set, downloading a prebuilt release binary instead..." >&2
+      fetch_binary "${staging_dir}"
+    else
+      printf '%s\n' "Error: local build failed; refusing to silently fall back to a downloaded binary." >&2
+      printf '%s\n' "Fix the build error above, or re-run with FEADER_RSS_ALLOW_REMOTE_FALLBACK=1 to explicitly allow downloading the matching release binary instead." >&2
+      exit 1
+    fi
   fi
 elif is_local_checkout; then
   printf '%s\n' "Local checkout detected but 'go' is not installed; downloading a prebuilt release binary instead." >&2
-  fetch_binary
+  fetch_binary "${staging_dir}"
 else
-  fetch_binary
+  fetch_binary "${staging_dir}"
 fi
+
+# Every file is now built and verified in staging_dir. Commit it to the live
+# plugin directory by overwriting each plugin-owned file in place (never a
+# bulk directory replace) so a checkout of this repository placed directly
+# at ${destination} keeps its .git history and anything else untouched.
+mkdir -p "${destination}"
+install -m 0644 \
+  "${staging_dir}/manifest.json" \
+  "${staging_dir}/BarWidget.qml" \
+  "${staging_dir}/Panel.qml" \
+  "${staging_dir}/README.md" \
+  "${staging_dir}/example-config.json" \
+  "${destination}/"
+install -m 0755 "${staging_dir}/${binary_name}" "${destination}/${binary_name}"
+
+# Clean up filenames/directories from older plugin layouts that have no
+# replacement above.
+rm -f "${destination}/rss-fetch.py"
+rm -rf "${destination}/src" "${destination}/scripts"
+
+trap - EXIT
+rm -rf -- "${staging_dir}"
 
 printf '%s\n' "Plugin copied to ${destination}"
 omarchy plugin enable "${plugin_id}" right
