@@ -266,7 +266,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("root.feedErrors.length > 0", PANEL)
         self.assertIn("Color.urgent", PANEL)
 
-    def test_feed_error_server_fields_are_rendered_as_plain_text(self):
+    def test_feed_error_server_fields_are_plain_text_before_remote_binding(self):
         match = re.search(
             r"model: root\.feedErrors\s+delegate: Text \{(?P<delegate>.*?)\n {12}\}\n {10}\}",
             PANEL,
@@ -274,7 +274,14 @@ class UiAccessibilityContractTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         delegate = match.group("delegate")
-        self.assertIn("textFormat: Text.PlainText", delegate)
+        text_format = "textFormat: Text.PlainText"
+        text_binding = 'text: String(modelData.name || modelData.feed || modelData.url || "Feed")'
+        self.assertIn(text_format, delegate)
+        self.assertIn(text_binding, delegate)
+        # Keep the security declaration before the remote binding. The
+        # marketplace verifier reviews this delegate linearly and this order
+        # makes it impossible to accidentally reintroduce the flagged shape.
+        self.assertLess(delegate.index(text_format), delegate.index(text_binding))
         for field in ("modelData.name", "modelData.error", "modelData.message"):
             self.assertIn(field, delegate)
 
