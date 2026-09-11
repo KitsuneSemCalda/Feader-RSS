@@ -41,6 +41,25 @@ is_local_checkout() {
 }
 
 release_workflow="${repo}/.github/workflows/release.yml"
+# Bound every download so a stalled or malicious server can't hang the
+# installer or exhaust disk space: 15s to connect, 60s total, 100MB cap.
+curl_guard=(--proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 --max-filesize 100000000)
+
+# The commit that provenance must be pinned to. A local checkout independently
+# knows its own HEAD, which is the actual reviewed source this script was
+# read from — verifying against that closes the gap where an attacker who can
+# move/re-push the release tag (refs/tags/v*) gets a new attestation that
+# still matches a --source-ref check by name alone. Without a local checkout
+# there is no independently trusted commit, so fall back to resolving the tag
+# once via the API; that is weaker (still trusts the tag at fetch time) but
+# still pins to a concrete digest instead of a ref string.
+resolve_source_digest() {
+  if is_local_checkout && command -v git >/dev/null 2>&1; then
+    git -C "${plugin_root}" rev-parse HEAD
+    return
+  fi
+  gh api "repos/${repo}/commits/v${version}" --jq '.sha'
+}
 
 # build_local and fetch_binary each install the binary into the given staging
 # directory rather than the live destination, so a failure here never leaves
@@ -82,17 +101,44 @@ fetch_binary() {
   checksums_path="${tmp_dir}/checksums.txt"
 
   printf '%s\n' "Downloading ${asset_name} from GitHub release v${version}..."
-  if ! curl -fsSL --proto '=https' --tlsv1.2 -o "${asset_path}" "${url}"; then
+  if ! curl -fsSL "${curl_guard[@]}" -o "${asset_path}" "${url}"; then
     printf '%s\n' "Error: failed to download release asset: ${url}" >&2
     printf '%s\n' "If this version has no published release yet, build locally with: go build -o scripts/${binary_name} ./cmd/${binary_name}" >&2
     exit 1
   fi
 
-  if ! curl -fsSL --proto '=https' --tlsv1.2 -o "${checksums_path}" "${checksums_url}"; then
+  if ! curl -fsSL "${curl_guard[@]}" -o "${checksums_path}" "${checksums_url}"; then
     printf '%s\n' "Error: failed to download checksums.txt: ${checksums_url}" >&2
     printf '%s\n' "Refusing to install an unverified binary." >&2
     exit 1
   fi
+
+  local source_digest
+  source_digest="$(resolve_source_digest)"
+  if [[ -z "${source_digest}" ]]; then
+    printf '%s\n' "Error: could not resolve the source commit for v${version} to pin provenance verification to." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "Verifying build provenance attestation..."
+  # Pin verification to the exact workflow file that is allowed to sign a
+  # release binary and to the exact commit it must have been built from
+  # (--source-digest), not the release tag name. A tag is a movable pointer:
+  # an attacker who can re-push/retarget refs/tags/v${version} can get a new,
+  # honestly-signed attestation for a different commit that still matches a
+  # ref-name check. Checking both downloads binds the checksum manifest itself
+  # to the same pinned provenance, not just the binary it describes.
+  for downloaded in "${checksums_path}" "${asset_path}"; do
+    if ! gh attestation verify "${downloaded}" --repo "${repo}" \
+        --signer-workflow "${release_workflow}" \
+        --source-digest "${source_digest}" >/dev/null; then
+      printf '%s\n' "Error: build provenance attestation verification failed for $(basename "${downloaded}")." >&2
+      printf '%s\n' "Refusing to install: cannot verify it was built by ${release_workflow} from commit ${source_digest}." >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' "Provenance verified: both downloads were built by ${release_workflow} from commit ${source_digest}."
+
   expected="$(grep -F " ${asset_name}" "${checksums_path}" | awk '{print $1}' | head -n1)"
   if [[ -z "${expected}" ]]; then
     printf '%s\n' "Error: no checksum entry for ${asset_name} in checksums.txt" >&2
@@ -104,20 +150,6 @@ fetch_binary() {
     exit 1
   fi
   printf '%s\n' "Checksum verified."
-
-  printf '%s\n' "Verifying build provenance attestation..."
-  # Pin verification to the exact workflow file that is allowed to sign a
-  # release binary and to the tag it must have been built from, instead of
-  # only the repository — a checksum and a same-repo attestation are not
-  # enough on their own if any other workflow in the repo could also sign.
-  if ! gh attestation verify "${asset_path}" --repo "${repo}" \
-      --signer-workflow "${release_workflow}" \
-      --source-ref "refs/tags/v${version}" >/dev/null; then
-    printf '%s\n' "Error: build provenance attestation verification failed for ${asset_name}." >&2
-    printf '%s\n' "Refusing to install a binary that cannot be verified as built by ${release_workflow} from tag v${version}." >&2
-    exit 1
-  fi
-  printf '%s\n' "Provenance verified: binary was built by ${release_workflow} from tag v${version}."
 
   chmod +x "${asset_path}"
   install -m 0755 "${asset_path}" "${target_dir}/${binary_name}"
