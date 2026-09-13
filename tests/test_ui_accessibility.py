@@ -301,6 +301,18 @@ class UiAccessibilityContractTests(unittest.TestCase):
         self.assertIn("onClicked: root.closeSettings()", PANEL)
         self.assertIn("if (settingsOpen) { settingsOpen = false; resetFeedModel() }", PANEL)
 
+    def test_configure_feeds_icon_avoids_the_color_emoji_font(self):
+        # U+2699 (plain Unicode gear) has no glyph in the bar's own font
+        # (JetBrainsMono Nerd Font) but does in the system's color emoji
+        # font (Noto Color Emoji), so Qt's font-fallback chain rendered a
+        # full-color gear emoji here instead of a flat icon -- confirmed
+        # visually on a live Quickshell instance. U+F013, the Nerd Font
+        # "cog" glyph from the same private-use icon set as the bar's own
+        # RSS glyph (`label` above), has no entry in the emoji font, so it
+        # can't fall back to one.
+        self.assertNotIn("⚙", PANEL, "the plain Unicode gear renders as a color emoji; use \\uF013 instead")
+        self.assertIn('iconText: "\\uF013"', PANEL)
+
     def test_bar_exposes_complete_panel_lifecycle(self):
         for function_name in ("open", "close", "toggle", "closeForPopoutSwitch"):
             self.assertRegex(BAR, rf"function {function_name}\(")
