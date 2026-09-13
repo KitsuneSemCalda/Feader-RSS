@@ -481,7 +481,15 @@ Panel {
   function toggle() { if (root.opened) close(); else open() }
 
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    // The plugin-facing bar object exposes centerHoverRevealSuppressed as
+    // read-only and offers this setter function instead — assigning the
+    // property directly throws a TypeError that aborts whichever caller
+    // (e.g. close()) invoked it mid-function, silently breaking every
+    // button that routes through it. Only fall back to the direct
+    // assignment for a bar stub that predates the setter.
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
