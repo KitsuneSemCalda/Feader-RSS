@@ -219,5 +219,137 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
             self.assertFalse((destination / "feader-rss-fetch").exists())
 
 
+@unittest.skipUnless(shutil.which("bash"), "requires bash")
+class DestinationSafetyTests(unittest.TestCase):
+    """The standard `omarchy plugin add` path clones straight into
+    ${destination} and never runs an install hook (see README.md), so the
+    documented way to fetch the runtime binary is to run this script in
+    place, with plugin_root == destination. Guard both failure modes that
+    matter there: self-deleting the live scripts/ tree, and following a
+    symlink planted at the destination path."""
+
+    def _stub_bin_with_working_go(self, base):
+        bin_dir = base / "bin"
+        bin_dir.mkdir()
+        _write_stub(
+            bin_dir / "uname",
+            'case "$1" in -s) echo "Linux" ;; -m) echo "x86_64" ;; esac',
+        )
+        _write_stub(bin_dir / "omarchy", "exit 0")
+        _write_stub(
+            bin_dir / "go",
+            "\n".join(
+                [
+                    'out="" prev=""',
+                    'for a in "$@"; do',
+                    '  if [[ "$prev" == "-o" ]]; then out="$a"; fi',
+                    '  prev="$a"',
+                    "done",
+                    'if [[ -n "$out" ]]; then printf \'fake-binary\' > "$out"; fi',
+                    "exit 0",
+                ]
+            ),
+        )
+        return bin_dir
+
+    def test_self_install_preserves_scripts_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config_home = base / "config"
+            dest = config_home / "omarchy" / "plugins" / "io.github.kitsunesemcalda.feader-rss"
+            dest.mkdir(parents=True)
+
+            for name in ("manifest.json", "BarWidget.qml", "Panel.qml", "README.md", "example-config.json"):
+                shutil.copy(ROOT / name, dest / name)
+            scripts_dir = dest / "scripts"
+            scripts_dir.mkdir()
+            for name in ("install.sh", "backup.sh", "database-tools.sh", "restore.sh"):
+                target = scripts_dir / name
+                shutil.copy(ROOT / "scripts" / name, target)
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+            run = lambda *args: subprocess.run(args, cwd=dest, check=True, capture_output=True)
+            run("git", "init", "-q")
+            run("git", "config", "user.email", "test@example.com")
+            run("git", "config", "user.name", "Test")
+            run("git", "add", "-A")
+            run("git", "commit", "-q", "-m", "test")
+
+            bin_dir = self._stub_bin_with_working_go(base)
+            env = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                "XDG_CONFIG_HOME": str(config_home),
+                "XDG_STATE_HOME": str(base / "state"),
+            }
+
+            result = subprocess.run(
+                ["bash", str(dest / "scripts/install.sh")],
+                cwd=dest,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            for name in ("install.sh", "backup.sh", "database-tools.sh", "restore.sh"):
+                self.assertTrue((scripts_dir / name).exists(), msg=f"{name} was deleted")
+            self.assertTrue((dest / "feader-rss-fetch").exists())
+
+    def test_refuses_to_write_through_symlinked_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config_home = base / "config"
+            (config_home / "omarchy" / "plugins").mkdir(parents=True)
+
+            evil_target = base / "evil_target"
+            evil_target.mkdir()
+            sentinel = evil_target / "PRE_EXISTING_SENTINEL"
+            sentinel.write_text("do not touch")
+
+            dest = config_home / "omarchy" / "plugins" / "io.github.kitsunesemcalda.feader-rss"
+            dest.symlink_to(evil_target)
+
+            plugin_dir = base / "plugin"
+            plugin_dir.mkdir()
+            for name in ("manifest.json", "BarWidget.qml", "Panel.qml", "README.md", "example-config.json"):
+                shutil.copy(ROOT / name, plugin_dir / name)
+            scripts_dir = plugin_dir / "scripts"
+            scripts_dir.mkdir()
+            for name in ("install.sh", "backup.sh", "database-tools.sh"):
+                target = scripts_dir / name
+                shutil.copy(ROOT / "scripts" / name, target)
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+            bin_dir = base / "bin"
+            bin_dir.mkdir()
+            _write_stub(
+                bin_dir / "uname",
+                'case "$1" in -s) echo "Linux" ;; -m) echo "x86_64" ;; esac',
+            )
+            _write_stub(bin_dir / "omarchy", "exit 0")
+            _write_stub(bin_dir / "go", 'exit 1')
+
+            env = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                "XDG_CONFIG_HOME": str(config_home),
+                "XDG_STATE_HOME": str(base / "state"),
+            }
+
+            result = subprocess.run(
+                ["bash", str(plugin_dir / "scripts/install.sh")],
+                cwd=plugin_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlink", (result.stdout + result.stderr).lower())
+            self.assertEqual(sentinel.read_text(), "do not touch")
+            self.assertFalse((evil_target / "feader-rss-fetch").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

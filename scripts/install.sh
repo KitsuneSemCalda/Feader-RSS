@@ -155,20 +155,23 @@ fetch_binary() {
   install -m 0755 "${asset_path}" "${target_dir}/${binary_name}"
 }
 
+validate_destination_not_symlink() {
+  if [[ -e "${destination}" && ! -d "${destination}" ]]; then
+    printf '%s\n' "Error: destination exists and is not a directory: ${destination}" >&2
+    exit 1
+  fi
+  if [[ -L "${destination}" ]]; then
+    printf '%s\n' "Error: destination is a symlink; refusing to write to ${destination}." >&2
+    exit 1
+  fi
+}
+
 printf '%s\n' "Validating the plugin..."
 omarchy plugin validate "${plugin_root}"
 
 bash "${plugin_root}/scripts/backup.sh"
 
-if [[ -e "${destination}" && ! -d "${destination}" ]]; then
-  printf '%s\n' "Error: destination exists and is not a directory: ${destination}" >&2
-  exit 1
-fi
-
-if [[ -L "${destination}" ]]; then
-  printf '%s\n' "Error: destination is a symlink; refusing to clean ${destination}." >&2
-  exit 1
-fi
+validate_destination_not_symlink
 
 destination_parent="$(dirname -- "${destination}")"
 mkdir -p "${destination_parent}"
@@ -212,21 +215,49 @@ fi
 # plugin directory by overwriting each plugin-owned file in place (never a
 # bulk directory replace) so a checkout of this repository placed directly
 # at ${destination} keeps its .git history and anything else untouched.
+#
+# Re-validate the destination immediately before writing to it: the check
+# above ran before the build/download step, which can take a while, so
+# re-checking here shrinks the window an attacker has to swap ${destination}
+# for a symlink to almost nothing. Then confirm we own the directory and open
+# it through a file descriptor, and do every subsequent write/delete through
+# that descriptor (/dev/fd/N) instead of by path — the kernel resolves a
+# subpath under /dev/fd/N against the directory the descriptor already
+# refers to, so a symlink substituted in after this point can no longer
+# redirect these writes elsewhere.
+validate_destination_not_symlink
 mkdir -p "${destination}"
+if [[ ! -O "${destination}" ]]; then
+  printf '%s\n' "Error: destination is not owned by the current user: ${destination}" >&2
+  exit 1
+fi
+exec {dest_fd}<"${destination}"
+dest="/dev/fd/${dest_fd}"
+
 install -m 0644 \
   "${staging_dir}/manifest.json" \
   "${staging_dir}/BarWidget.qml" \
   "${staging_dir}/Panel.qml" \
   "${staging_dir}/README.md" \
   "${staging_dir}/example-config.json" \
-  "${destination}/"
-install -m 0755 "${staging_dir}/${binary_name}" "${destination}/${binary_name}"
+  "${dest}/"
+install -m 0755 "${staging_dir}/${binary_name}" "${dest}/${binary_name}"
 
 # Clean up filenames/directories from older plugin layouts that have no
-# replacement above.
-rm -f "${destination}/rss-fetch.py"
-rm -rf "${destination}/src" "${destination}/scripts"
+# replacement above — but only when ${destination} is a separate copy target
+# from ${plugin_root}. Omarchy's standard `omarchy plugin add` path clones
+# straight into ${destination} and "does not execute an install hook" (see
+# README.md), so the documented way to fetch the runtime binary there is to
+# run this script in place, with plugin_root == destination. In that case
+# scripts/ and src/ are this run's own live source tree, not legacy leftovers
+# from an older layout, and rm -rf'ing them would delete the very script
+# that's running plus the backup.sh/restore.sh commands README.md documents.
+if [[ "$(cd -- "${destination}" && pwd)" != "${plugin_root}" ]]; then
+  rm -f -- "${dest}/rss-fetch.py"
+  rm -rf -- "${dest}/src" "${dest}/scripts"
+fi
 
+exec {dest_fd}<&-
 trap - EXIT
 rm -rf -- "${staging_dir}"
 
