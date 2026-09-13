@@ -305,6 +305,28 @@ class UiAccessibilityContractTests(unittest.TestCase):
         for function_name in ("open", "close", "toggle", "closeForPopoutSwitch"):
             self.assertRegex(BAR, rf"function {function_name}\(")
 
+    def test_center_hover_reveal_uses_setter_before_direct_assignment(self):
+        # The bar object plugins receive exposes centerHoverRevealSuppressed
+        # as read-only and only accepts writes through
+        # setCenterHoverRevealSuppressed(value). Assigning the property
+        # directly throws a TypeError that aborts close()/open() mid-call
+        # (before root.controller.hide()/show() runs), which is what made
+        # every panel button that routes through close()/toggle() look
+        # broken. The setter must be tried first; the direct assignment may
+        # only be a fallback for a bar stub without the setter.
+        match = re.search(
+            r"function setCenterHoverRevealSuppressed\(value\) \{(.*?)\n  \}",
+            PANEL, re.S,
+        )
+        self.assertIsNotNone(match, "setCenterHoverRevealSuppressed function not found")
+        body = match.group(1)
+        setter_call = body.find("root.bar.setCenterHoverRevealSuppressed(value)")
+        direct_assign = body.find("root.bar.centerHoverRevealSuppressed = value")
+        self.assertNotEqual(setter_call, -1, "must call the bar's setter function")
+        self.assertNotEqual(direct_assign, -1, "must keep a fallback for bars without the setter")
+        self.assertLess(setter_call, direct_assign,
+            "the setter call must be tried before the direct read-only assignment")
+
 
 if __name__ == "__main__":
     unittest.main()
