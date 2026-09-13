@@ -1266,7 +1266,14 @@ Panel {
         Button {
           id: configureButton
           text: "Configure feeds"
-          iconText: "⚙"
+          // The plain Unicode gear (U+2699) has no glyph in the bar's
+          // own font (JetBrainsMono Nerd Font) but does in the system's
+          // color emoji font, so Qt's fallback chain rendered a full-color
+          // gear emoji here instead of a flat icon. U+F013 is the Nerd
+          // Font "cog" glyph -- same private-use icon set as the bar's
+          // RSS glyph (label in Panel.qml) -- which the emoji font has no
+          // entry for, so no fallback happens.
+          iconText: "\uF013"
           tooltipText: "Manage feeds and reader settings"
           foreground: root.foreground
           focusable: true
