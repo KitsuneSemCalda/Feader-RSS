@@ -195,9 +195,14 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
   ~metade (154/301) dos artigos já em cache no banco real testado.
   Faltam datas de publicação inválidas/malformadas (não vazias) e mais
   cobertura de CLI.
-- [ ] Fazer `go test -race ./...` funcionar no ambiente de CI e registrar a versão/toolchain
+- [x] Fazer `go test -race ./...` funcionar no ambiente de CI e registrar a versão/toolchain
   suportada; no ambiente local de 2026-08-28 o Go 1.27 falha em `runtime/race` antes de rodar
-  os testes (`package testmain cannot find package`).
+  os testes (`package testmain cannot find package`). — 2026-09-15: confirmado que não é mais
+  um bloqueio. O job `go` do `.github/workflows/ci.yml` já roda `go test -race ./...` a cada
+  push/PR e está verde nas últimas execuções (`gh run list`, todas `completed success` desde
+  2026-09-13); localmente, Go 1.27.1 também roda a suíte completa com `-race` sem erro. A
+  toolchain suportada é a fixada em `go.mod` (`go 1.27.0`), sem pin adicional de versão exata
+  no CI (`actions/setup-go` usa `go-version-file: go.mod`).
 - [x] Atualizar README e scripts para refletir o backup SQLite, os diretórios XDG e a sequência
   correta de instalação/restore.
 - [ ] Marcar o bump de versão do manifest somente quando a próxima release estiver pronta.
