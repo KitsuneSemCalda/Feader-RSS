@@ -85,6 +85,28 @@ All notable changes to Feader RSS are documented in this file.
   many short-lived connections against the same `items.db` file mutating and
   reading concurrently, confirming WAL mode and the existing busy timeout
   absorb real cross-process contention without errors or lost writes.
+- Fixed the panel silently failing to close: `close()` assigned directly to
+  `root.bar.centerHoverRevealSuppressed`, which the plugin-facing bar object
+  now exposes as read-only, throwing an uncaught `TypeError` that aborted
+  `close()` before it reached `root.controller.hide()`. Every control that
+  routes through `close()`/`toggle()`, including the bar icon itself, stopped
+  closing the panel until the fix. Now calls the bar's
+  `setCenterHoverRevealSuppressed(value)` setter (matching the first-party
+  clock/weather panels), falling back to the direct assignment only for a bar
+  stub that predates the setter.
+- Fixed the "Configure feeds" gear rendering as a full-color emoji instead of
+  a flat icon: its `iconText` used the plain Unicode gear (U+2699), which has
+  no glyph in the bar's own font but does in the system's color emoji font,
+  so Qt's font-fallback chain picked the emoji glyph. Switched to U+F013, the
+  Nerd Font "cog" glyph from the same private-use icon set as the bar's own
+  RSS glyph, which the emoji font has no entry for.
+
+### Security
+- Fixed the installer's legacy-layout cleanup deleting its own live
+  `scripts/` directory (and thus itself, mid-run) when run in place at the
+  destination — the path `omarchy plugin add` uses, where it never runs an
+  install hook. The cleanup now only runs when the destination is a separate
+  copy target from the plugin's own source tree.
 
 ## [0.3.3] - 2026-09-02
 
