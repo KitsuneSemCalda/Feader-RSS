@@ -221,3 +221,74 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
 - [x] Indexar título, resumo, conteúdo cacheado, metadados e tags com FTS5.
 - [x] Adicionar favoritos/salvos, tags editáveis e filtros por pasta/feed.
 - [x] Adicionar importação e exportação OPML via `feader-rss-fetch`.
+
+## 13. Backlog priorizado — 2026-09-15
+
+Backlog sem prioridade é só um cemitério de boas intenções.
+
+### P0
+
+- [ ] Corrigir de vez o fluxo de instalação pública. `omarchy plugin add ... --enable` não
+  executa hook de instalação, então o binário `feader-rss-fetch` não fica disponível
+  automaticamente após o clone — só `scripts/install.sh` resolve build/download, checksum,
+  attestation e staging, mas isso não roda sozinho no fluxo padrão do Omarchy.
+  Objetivo: alguém deveria conseguir instalar o Feader sem precisar entender por que existe
+  QML de um lado e um binário Go de outro.
+- [ ] Quebrar `Panel.qml` em módulos menores. São ~77 KB concentrando estado, filtros,
+  configuração, IPC, processos, notificações, busca, teclado e UI. Divisão sugerida, sem
+  inventar arquitetura espacial: `ReaderController.qml`, `ReaderState.qml`, `InboxView.qml`,
+  `ArticleView.qml`, `SettingsView.qml`, `ArticleCard.qml`. O arquivo deveria terminar parecendo
+  um compositor, não o Livro dos Mortos egípcio.
+- [ ] Tornar o FTS5 incremental. `rebuildFTS()` apaga e recria o índice inteiro e é chamado em
+  abertura, upsert, alteração de conteúdo, tags, pruning, importações e migrações — tranquilo
+  com 1.000 artigos, começa a ficar idiota com retenção de até 100.000. Usar triggers ou updates
+  pontuais por id; manter rebuild global só para reparo/migração.
+
+### P1
+
+- [ ] Introduzir migrations versionadas de verdade (`PRAGMA user_version` ou tabela
+  `schema_migrations`) em vez de `ensureColumns()`. Já existe JSON→SQLite, mudanças de schema e
+  migração de identidade dos artigos — a sequência ideal vira v1 → v2 → v3, não "vejamos quais
+  colunas sobreviveram ao inverno".
+- [ ] Mover mais regra de negócio do QML para Go. A separação QML→CLI→Go já é um dos pontos
+  fortes do projeto; aprofundar essa linha. Regra: QML apresenta e coordena, Go decide e
+  persiste — hoje o QML ainda sanitiza feeds, normaliza configurações e calcula estado. Melhora
+  testabilidade absurdamente.
+- [ ] Formalizar o protocolo entre QML e o backend. Hoje já existe implicitamente como
+  comandos + JSON (`fetch`, `list`, `search`, `article`, `mark-read`, `star`, etc.). Documentar
+  uma versão mínima de protocolo (`protocolVersion: 1`) e padronizar erros:
+  `{"ok":false,"code":"feed_timeout","message":"..."}`. Evita o frontend depender de mensagens
+  textuais específicas no futuro.
+- [ ] Melhorar testes reais do QML/Quickshell. A seção 11 já reconhece que parte da validação
+  ainda é busca de strings, sem cobertura comportamental real. Não automatizar cada pixel — pelo
+  menos cobrir o ciclo crítico: abrir painel → carregar banco → pesquisar → abrir artigo →
+  favoritar → fechar/reabrir.
+- [ ] Adicionar observabilidade local decente. Hoje só há `console.warn` e stderr dos
+  processos. Modo diagnóstico simples (`FEADER_RSS_DEBUG=1`) registrando tempos de fetch, parse,
+  DB, FTS, prefetch e falhas por feed. Não precisa virar OpenTelemetry num leitor RSS.
+
+### P2
+
+- [ ] Otimizar o modelo de prefetch. Hoje cacheia até 20 artigos com concorrência 3 e backoff
+  persistente. Priorizar: não lidos primeiro, artigo mais recente, feed que o usuário mais lê;
+  talvez excluir starred (já deve estar cacheado). Deixa o offline mais inteligente sem
+  infraestrutura extra.
+- [ ] Melhorar a extração de artigo. O extrator já remove `nav`, `script`, `footer`,
+  `noscript`, `template` etc. Adicionar heurísticas de densidade textual para escolher
+  `<article>`, `<main>` ou o container mais provável, sem virar um motor de browser. Reduz lixo
+  em páginas semanticamente ruins.
+- [ ] Corrigir pequenos drifts de manutenção. Confirmado em 2026-09-15:
+  `internal/safefetch/safefetch.go`'s `UserAgent` ainda diz `.../0.2` enquanto `manifest.json`
+  está em `0.3.4`; `go.mod` marca `golang.org/x/net`, `modernc.org/sqlite` e outras dependências
+  como `// indirect` mesmo sendo importadas diretamente (`internal/feed`, `internal/article`,
+  `internal/store`); e `.github/workflows/release.yml` já tenta centralizar a versão via
+  `-ldflags "-X main.version=${version}"`, mas não existe `var version` em `package main` para
+  receber isso — o `-X` é um no-op silencioso hoje (confirmado: `go build` com esse ldflag não
+  falha nem avisa, só não faz nada). Corrigir os três: declarar `var version = "dev"` em
+  `main.go` e usá-lo no `UserAgent` e num futuro `--version`, e rodar
+  `go mod tidy && git diff --exit-code` no CI.
+- [ ] Fechar o último ponto de supply chain e parar por aí. O instalador já verifica
+  provenance, workflow assinante, commit de origem e checksum, e usa staging antes de
+  substituir arquivos — isso está excelente (seção "Distribuição e supply chain" acima cobre o
+  restante, incluindo o `RELEASE_DIGESTS.json` da seção 11). Feader é um leitor RSS, não o
+  sistema de lançamento nuclear dos EUA.
