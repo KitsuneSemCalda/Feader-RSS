@@ -186,9 +186,24 @@ jobs:
             checksums.txt
             ${{ steps.package.outputs.archive }}
 
+      - name: Extract this version's changelog section
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          awk -v ver="${tag_version}" '
+            $0 ~ ("^## \\[" ver "\\]") { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' docs/CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "docs/CHANGELOG.md has no [${tag_version}] section (or it's empty)." >&2
+            echo "Add one before tagging so the release has real notes." >&2
+            exit 1
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: |
             ${{ steps.package.outputs.archive }}
