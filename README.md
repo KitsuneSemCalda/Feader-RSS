@@ -3,6 +3,12 @@
 A persistent RSS reader for the Omarchy shell, built as a Quickshell plugin.
 
 <p align="center">
+  <a href="https://github.com/KitsuneSemCalda/Feader-RSS/actions/workflows/ci.yml"><img src="https://github.com/KitsuneSemCalda/Feader-RSS/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/KitsuneSemCalda/Feader-RSS/releases/latest"><img src="https://img.shields.io/github/v/release/KitsuneSemCalda/Feader-RSS" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KitsuneSemCalda/Feader-RSS" alt="License"></a>
+</p>
+
+<p align="center">
   <img src="assets/screenshots/0.3.0/HasNewFeeds.png" alt="Feader RSS bar icon with unread articles" height="48">
   <img src="assets/screenshots/0.3.0/AllFeedsReaded.png" alt="Feader RSS bar icon with all articles read" height="48">
 </p>
@@ -205,3 +211,8 @@ the version, or it doesn't match the tagged commit. This is what
 `scripts/install.sh` pins provenance verification to for installs without a
 local checkout — a maintainer-reviewed, historied record on `master`, not the
 movable release tag itself.
+
+## Project docs
+
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — release history.
+- [`docs/TODO.md`](docs/TODO.md) — roadmap and prioritized backlog.
