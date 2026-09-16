@@ -49,16 +49,26 @@ curl_guard=(--proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 --max-
 # knows its own HEAD, which is the actual reviewed source this script was
 # read from — verifying against that closes the gap where an attacker who can
 # move/re-push the release tag (refs/tags/v*) gets a new attestation that
-# still matches a --source-ref check by name alone. Without a local checkout
-# there is no independently trusted commit, so fall back to resolving the tag
-# once via the API; that is weaker (still trusts the tag at fetch time) but
-# still pins to a concrete digest instead of a ref string.
+# still matches a --source-ref check by name alone.
+#
+# Without a local checkout there is no independently trusted commit, so read
+# the expected digest from RELEASE_DIGESTS.json on the `master` branch instead
+# of resolving the tag directly. The maintainer commits an entry there, after
+# reviewing the release commit, before ever pushing the matching tag (the
+# release workflow's "Verify RELEASE_DIGESTS.json pins this exact commit" step
+# refuses to publish a release otherwise). An attacker able to move the tag
+# would also have to alter reviewed, historied content on `master` to change
+# what this resolves to — not just retarget a movable pointer.
 resolve_source_digest() {
   if is_local_checkout && command -v git >/dev/null 2>&1; then
     git -C "${plugin_root}" rev-parse HEAD
     return
   fi
-  gh api "repos/${repo}/commits/v${version}" --jq '.sha'
+  local escaped_version="${version//./\\.}"
+  gh api "repos/${repo}/contents/RELEASE_DIGESTS.json?ref=master" --jq '.content' \
+    | base64 -d \
+    | sed -n "s/.*\"${escaped_version}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+    | head -n1
 }
 
 # build_local and fetch_binary each install the binary into the given staging

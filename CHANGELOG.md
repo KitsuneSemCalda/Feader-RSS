@@ -107,6 +107,15 @@ All notable changes to Feader RSS are documented in this file.
   destination — the path `omarchy plugin add` uses, where it never runs an
   install hook. The cleanup now only runs when the destination is a separate
   copy target from the plugin's own source tree.
+- Added `RELEASE_DIGESTS.json`, a maintainer-committed record mapping each
+  released version to its exact source commit. Installs without a local
+  checkout now pin provenance verification to the entry read from that file
+  on `master`, instead of resolving the release tag directly — closing the
+  gap where an attacker able to move/re-push the release tag could obtain a
+  fresh, honestly-signed attestation for a different commit that still
+  resolved by tag name. The release workflow refuses to publish unless the
+  file already contains an entry matching the tagged commit, so the digest
+  must be reviewed and committed before the tag exists.
 
 ## [0.3.3] - 2026-09-02
 

@@ -186,3 +186,22 @@ GitHub Actions runs the Python tests, manifest validation, installer syntax
 checks, whitespace checks, and the Go backend tests/build on pushes and pull
 requests. Pushing a tag such as `v0.1.0` creates a GitHub Release with a
 plugin archive and the cross-compiled `feader-rss-fetch` binaries attached.
+
+Before tagging a release:
+
+1. Commit the release itself (version bump, changelog) and push it to
+   `master`. Call its commit SHA `<sha>`.
+2. In a **separate, later commit**, add `"<version>": "<sha>"` to
+   `RELEASE_DIGESTS.json` and push that to `master` too. (It has to be a
+   later commit: the entry records `<sha>`'s own hash, which doesn't exist
+   until that commit is made, so the release commit itself can never contain
+   the correct entry for its own hash.)
+3. Push the tag `v<version>` pointing at `<sha>` — the release commit from
+   step 1, not the bookkeeping commit from step 2.
+
+The release workflow reads `RELEASE_DIGESTS.json` from `master`'s current tip
+(not from the tagged commit) and refuses to publish if there's no entry for
+the version, or it doesn't match the tagged commit. This is what
+`scripts/install.sh` pins provenance verification to for installs without a
+local checkout — a maintainer-reviewed, historied record on `master`, not the
+movable release tag itself.

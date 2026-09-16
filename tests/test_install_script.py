@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import re
@@ -16,7 +17,7 @@ VERSION = re.search(r'"version"\s*:\s*"([^"]+)"', (ROOT / "manifest.json").read_
 ASSET_NAME = f"feader-rss-fetch_{VERSION}_linux_amd64"
 ASSET_CONTENT = "fake-binary-bytes-for-tests"
 ASSET_SHA256 = hashlib.sha256(ASSET_CONTENT.encode()).hexdigest()
-API_RESOLVED_SHA = "1111111111111111111111111111111111111a"
+DIGESTS_RESOLVED_SHA = "1111111111111111111111111111111111111a"
 
 
 def _write_stub(path, body):
@@ -40,10 +41,35 @@ class InstallScriptSourceGuardTests(unittest.TestCase):
         # must never come back is an actual invocation pinning to the tag ref.
         self.assertNotIn('--source-ref "refs/tags/v${version}"', INSTALL_SCRIPT_TEXT)
 
+    def test_no_local_checkout_digest_comes_from_reviewed_release_digests_file(self):
+        # Without a local checkout, the source digest must come from the
+        # maintainer-committed RELEASE_DIGESTS.json on `master`, not from
+        # resolving the release tag directly (which a tag-mover controls).
+        self.assertIn("contents/RELEASE_DIGESTS.json?ref=master", INSTALL_SCRIPT_TEXT)
+        self.assertNotIn(f'api "repos/${{repo}}/commits/v${{version}}"', INSTALL_SCRIPT_TEXT)
+
     def test_both_downloads_are_attestation_checked(self):
         self.assertIn(
             'for downloaded in "${checksums_path}" "${asset_path}"', INSTALL_SCRIPT_TEXT
         )
+
+
+class ReleaseDigestsFileTests(unittest.TestCase):
+    def test_release_digests_file_is_valid_json_mapping_versions_to_commit_shas(self):
+        # Deliberately does NOT require an entry for the current manifest
+        # VERSION: the entry for a version can only be added in a commit
+        # *after* the version-bump commit (it records that commit's own SHA,
+        # which doesn't exist until the commit is made), so there is a real
+        # window — between bumping manifest.json and the follow-up digest
+        # commit — where no entry exists yet. The release workflow enforces
+        # the entry at tag time instead, when it must exist.
+        import json
+
+        digests = json.loads((ROOT / "RELEASE_DIGESTS.json").read_text())
+        self.assertIsInstance(digests, dict)
+        for version, sha in digests.items():
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+            self.assertRegex(sha, r"^[0-9a-f]{40}$")
 
 
 @unittest.skipUnless(shutil.which("bash"), "requires bash")
@@ -113,7 +139,7 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
                 [
                     'printf \'%s\\n\' "$*" >> "$GH_LOG"',
                     'case "$1" in',
-                    "  api) printf '%s\\n' \"$API_RESOLVED_SHA\" ;;",
+                    "  api) printf '%s\\n' \"$DIGESTS_CONTENT_B64\" ;;",
                     "  attestation)",
                     '    if [[ "${GH_ATTEST_FAIL:-0}" == "1" ]]; then exit 1; fi',
                     "    exit 0",
@@ -132,6 +158,9 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
         curl_log.touch()
         gh_log.touch()
 
+        digests_content_b64 = base64.b64encode(
+            f'{{"{VERSION}": "{DIGESTS_RESOLVED_SHA}"}}'.encode()
+        ).decode()
         env = {
             **os.environ,
             "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
@@ -141,7 +170,7 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
             "GH_LOG": str(gh_log),
             "CHECKSUMS_LINE": f"{ASSET_SHA256}  {ASSET_NAME}",
             "ASSET_CONTENT": ASSET_CONTENT,
-            "API_RESOLVED_SHA": API_RESOLVED_SHA,
+            "DIGESTS_CONTENT_B64": digests_content_b64,
         }
         if extra_env:
             env.update(extra_env)
@@ -170,12 +199,12 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
                 self.assertIn("--max-time", line)
                 self.assertIn("--max-filesize", line)
 
-            self.assertIn(f"api repos/{REPO}/commits/v{VERSION}", gh_log)
+            self.assertIn(f"api repos/{REPO}/contents/RELEASE_DIGESTS.json?ref=master", gh_log)
 
             verify_calls = [line for line in gh_log.splitlines() if line.startswith("attestation verify")]
             self.assertEqual(len(verify_calls), 2, msg=gh_log)
             for call in verify_calls:
-                self.assertIn(f"--source-digest {API_RESOLVED_SHA}", call)
+                self.assertIn(f"--source-digest {DIGESTS_RESOLVED_SHA}", call)
                 self.assertNotIn("--source-ref", call)
             # The downloaded asset is staged as plain "feader-rss-fetch" on
             # disk (the versioned/platform asset_name is only the checksums.txt
@@ -201,7 +230,7 @@ class FetchBinaryProvenanceTests(unittest.TestCase):
             self.assertEqual(len(verify_calls), 2, msg=gh_log)
             for call in verify_calls:
                 self.assertIn(f"--source-digest {head}", call)
-                self.assertNotIn(API_RESOLVED_SHA, call)
+                self.assertNotIn(DIGESTS_RESOLVED_SHA, call)
 
     def test_install_refuses_binary_when_attestation_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

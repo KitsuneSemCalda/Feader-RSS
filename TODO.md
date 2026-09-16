@@ -156,16 +156,19 @@ além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
 ### Distribuição e supply chain
 - [x] Corrigir o workflow de release: cada job publica um checksum com nome único e o job final
   valida e combina os quatro arquivos antes de publicar `checksums.txt`.
-- [ ] Amarrar o binário instalado a uma referência imutável e revisada (commit/tag protegido,
+- [x] Amarrar o binário instalado a uma referência imutável e revisada (commit/tag protegido,
   digest esperado ou artefato construído a partir do source revisado). O checksum baixado da
-  mesma release mutável não é suficiente por si só.
-  Parcialmente melhorado: a verificação de attestation agora também fixa o workflow assinante e o
-  ref de origem (item abaixo), reduzindo a superfície de forja. Falta algo mais estrutural — um
-  digest esperado revisado e commitado *antes* da release (ex.: um arquivo tipo
-  `RELEASE_DIGESTS.json` atualizado por um mantenedor após verificação independente) — para que o
-  instalador não dependa inteiramente de artefatos publicados na mesma release potencialmente
-  comprometida. Isso muda o processo de corte de release; vale alinhar com o mantenedor antes de
-  implementar.
+  mesma release mutável não é suficiente por si só. — 2026-09-15: implementado
+  `RELEASE_DIGESTS.json` na raiz do repo, mapeando `versão -> commit SHA`, mantido pelo
+  mantenedor e commitado em `master` *antes* de criar a tag. `resolve_source_digest()` em
+  `scripts/install.sh` agora lê esse arquivo via `gh api .../contents/RELEASE_DIGESTS.json?ref=master`
+  para instalações sem checkout local, em vez de resolver a tag diretamente
+  (`gh api .../commits/v$version`). `.github/workflows/release.yml` ganhou um passo
+  ("Verify RELEASE_DIGESTS.json pins this exact commit") que falha o release se a entrada
+  estiver ausente ou apontar para um commit diferente do que está sendo taggeado — isso força
+  o processo de dois passos (commitar o digest revisado, só depois taggear) em vez de deixá-lo
+  opcional. Testes cobrindo os dois lados em `tests/test_install_script.py` e
+  `tests/test_release_workflow.py`.
 - [x] Tornar a verificação de attestation explícita quanto ao workflow e ao commit de origem,
   em vez de verificar somente o repositório com `gh attestation verify --repo`.
 - [x] Fazer o instalador montar uma cópia temporária e trocar o plugin somente depois que o

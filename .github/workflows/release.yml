@@ -38,6 +38,31 @@ jobs:
             exit 1
           fi
 
+      - name: Verify RELEASE_DIGESTS.json pins this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          # Read from master's current tip via the API rather than the
+          # checked-out tag commit's own tree. The digest entry necessarily
+          # lands in a commit *after* the tagged one: it records that
+          # commit's own SHA, which only exists once the tagged commit
+          # itself does, so a commit can never contain the correct entry for
+          # its own hash. By the time the tag is pushed, the entry lives on
+          # master, one or more commits ahead of the tag it describes.
+          pinned="$(gh api "repos/${GITHUB_REPOSITORY}/contents/RELEASE_DIGESTS.json?ref=master" --jq '.content' \
+            | base64 -d \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('${tag_version}', ''))")"
+          if [ -z "${pinned}" ]; then
+            echo "RELEASE_DIGESTS.json (on master) has no entry for version ${tag_version}." >&2
+            echo "Add one mapping \"${tag_version}\" to this commit's SHA (${GITHUB_SHA}), commit it to master, then push the tag." >&2
+            exit 1
+          fi
+          if [ "${pinned}" != "${GITHUB_SHA}" ]; then
+            echo "RELEASE_DIGESTS.json entry for ${tag_version} (${pinned}) does not match the tagged commit (${GITHUB_SHA})." >&2
+            exit 1
+          fi
+
       - name: Validate plugin
         run: |
           python -m json.tool manifest.json >/dev/null
