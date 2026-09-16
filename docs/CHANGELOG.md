@@ -4,6 +4,8 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-15
+
 ### Changed
 - Reorganized the repository layout: `TODO.md` and `CHANGELOG.md` moved to
   `docs/`, and `screenshots/` moved under `assets/`. None of these are part
