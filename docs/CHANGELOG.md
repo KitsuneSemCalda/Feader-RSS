@@ -4,6 +4,16 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Reorganized the repository layout: `TODO.md` and `CHANGELOG.md` moved to
+  `docs/`, and `screenshots/` moved under `assets/`. None of these are part
+  of the installed plugin payload (`scripts/install.sh` never copied them),
+  so this only affects repository browsing, not installs. `preview.png` and
+  the shipped plugin files (`manifest.json`, `BarWidget.qml`, `Panel.qml`,
+  `README.md`, `LICENSE`, `example-config.json`) stay at the repository root,
+  matching the layout Omarchy's other first-party plugins use and what the
+  marketplace listing expects.
+
 ### Fixed
 - Fixed raw markup leaking into extracted article text and RSS summaries:
   `<noscript>` (tracking pixels, lazy-load CSS fallbacks, "enable JavaScript
