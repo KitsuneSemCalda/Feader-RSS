@@ -133,7 +133,7 @@ Panel {
     if (overrides && typeof overrides === "object") {
       for (var name in overrides) {
         if (!(name in merged)) continue
-        var key = String(overrides[name] || "").trim().toLowerCase()
+        var key = root.trimmed(overrides[name]).toLowerCase()
         if (key !== "") merged[name] = key
       }
     }
@@ -170,8 +170,12 @@ Panel {
     return "5 min"
   }
 
+  function trimmed(value) {
+    return String(value || "").trim()
+  }
+
   function inferFeedName(url) {
-    var match = /^https?:\/\/([^\/?#]+)/i.exec(String(url || "").trim())
+    var match = /^https?:\/\/([^\/?#]+)/i.exec(root.trimmed(url))
     if (!match) return ""
     var host = match[1].split("@").pop().split(":")[0].toLowerCase()
     return host.replace(/^www\./, "")
@@ -179,8 +183,8 @@ Panel {
 
   function feedDisplayName(feed) {
     if (!feed) return ""
-    var explicit = String(feed.name || "").trim()
-    var url = String(feed.url || "").trim()
+    var explicit = root.trimmed(feed.name)
+    var url = root.trimmed(feed.url)
     return explicit || root.inferFeedName(url) || url
   }
 
@@ -189,7 +193,7 @@ Panel {
     var target = String(feedName || "")
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
-      if (feed && root.feedDisplayName(feed) === target) return String(feed.folder || "").trim()
+      if (feed && root.feedDisplayName(feed) === target) return root.trimmed(feed.folder)
     }
     return ""
   }
@@ -208,14 +212,14 @@ Panel {
     var folders = []
     if (!config || !Array.isArray(config.feeds)) return folders
     for (var i = 0; i < config.feeds.length; i++) {
-      var folder = String(config.feeds[i].folder || "").trim()
+      var folder = root.trimmed(config.feeds[i].folder)
       if (folder !== "" && folders.indexOf(folder) < 0) folders.push(folder)
     }
     return folders
   }
 
   function formatPublished(value) {
-    var raw = String(value || "").trim()
+    var raw = root.trimmed(value)
     if (raw === "") return "Date unknown"
     var date = new Date(raw)
     if (isNaN(date.getTime())) return raw
@@ -225,17 +229,17 @@ Panel {
   function articleMeta(article) {
     if (!article) return ""
     var parts = []
-    var feedName = String(article.feed || "").trim()
-    var author = String(article.author || "").trim()
+    var feedName = root.trimmed(article.feed)
+    var author = root.trimmed(article.author)
     if (feedName !== "") parts.push(feedName)
     if (author !== "") parts.push("by " + author)
-    if (String(article.published || "").trim() !== "") parts.push(root.formatPublished(article.published))
+    if (root.trimmed(article.published) !== "") parts.push(root.formatPublished(article.published))
     var categories = Array.isArray(article.categories) ? article.categories.slice(0, 3) : []
-    categories = categories.map(function(category) { return String(category || "").trim() })
+    categories = categories.map(function(category) { return root.trimmed(category) })
       .filter(function(category) { return category !== "" })
     if (categories.length > 0) parts.push(categories.join(", "))
     var tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : []
-    tags = tags.map(function(tag) { return String(tag || "").trim() })
+    tags = tags.map(function(tag) { return root.trimmed(tag) })
       .filter(function(tag) { return tag !== "" })
     if (article.starred) parts.push("saved")
     if (tags.length > 0) parts.push("#" + tags.join(" #"))
@@ -244,7 +248,7 @@ Panel {
   }
 
   function articleSummary(article) {
-    var summary = article ? String(article.summary || "").trim() : ""
+    var summary = article ? root.trimmed(article.summary) : ""
     return summary !== "" ? summary : "This feed did not provide a summary. Open the article to read it."
   }
 
@@ -259,15 +263,15 @@ Panel {
     for (var i = 0; i < rawFeeds.length && feeds.length < 8; i++) {
       var feed = rawFeeds[i]
       if (!feed) continue
-      var url = String(feed.url || "").trim()
+      var url = root.trimmed(feed.url)
       if (!/^https?:\/\/[^\s]+$/i.test(url)) continue
       var normalizedUrl = url.toLowerCase().replace(/\/$/, "")
       if (seenUrls[normalizedUrl]) continue
-      var name = String(feed.name || "").trim() || root.inferFeedName(url) || url
+      var name = root.trimmed(feed.name) || root.inferFeedName(url) || url
       if (seenNames[name.toLowerCase()]) continue
       seenUrls[normalizedUrl] = true
       seenNames[name.toLowerCase()] = true
-      feeds.push({ name: name, url: url, folder: String(feed.folder || "").trim() })
+      feeds.push({ name: name, url: url, folder: root.trimmed(feed.folder) })
     }
     return feeds
   }
@@ -337,7 +341,7 @@ Panel {
     var seenNames = {}
     for (var i = 0; i < feedModel.count; i++) {
       var feed = feedModel.get(i)
-      var url = String(feed.url || "").trim()
+      var url = root.trimmed(feed.url)
       if (!/^https?:\/\/[^\s]+$/i.test(url)) {
         status = "Enter a valid http(s) URL for every feed."
         return
@@ -348,13 +352,13 @@ Panel {
         return
       }
       seenUrls[normalizedUrl] = true
-      var name = String(feed.name || "").trim() || root.inferFeedName(url) || url
+      var name = root.trimmed(feed.name) || root.inferFeedName(url) || url
       if (seenNames[name.toLowerCase()]) {
         status = "Each feed name must be unique."
         return
       }
       seenNames[name.toLowerCase()] = true
-      feeds.push({ name: name, url: url, folder: String(feed.folder || "").trim() })
+      feeds.push({ name: name, url: url, folder: root.trimmed(feed.folder) })
     }
     root.config = Object.assign({}, root.config, {
       feeds: feeds,
