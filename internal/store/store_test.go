@@ -1302,3 +1302,31 @@ func TestBackupAndRestoreRejectInvalidSourcesAndDestinations(t *testing.T) {
 		t.Fatalf("close maintenance database: %v", err)
 	}
 }
+
+func TestOpenRepairsStaleFTSIndexWithMatchingRowCount(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "items.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := s.Upsert([]feed.Item{{ID: "a", Feed: "F", Title: "Fresh title", URL: "https://x/a", Published: "2024-01-01"}}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// Same row count, stale content: only a content comparison notices.
+	if _, err := s.db.Exec(`UPDATE articles_fts SET title = 'Stale words' WHERE id = 'a'`); err != nil {
+		t.Fatalf("tamper index: %v", err)
+	}
+	s.Close()
+
+	s, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	if results, err := s.Search("Fresh", 0); err != nil || len(results) != 1 {
+		t.Fatalf("Search Fresh = %+v, %v; want the repaired article", results, err)
+	}
+	if results, err := s.Search("Stale", 0); err != nil || len(results) != 0 {
+		t.Fatalf("Search Stale = %+v, %v; want none", results, err)
+	}
+}
