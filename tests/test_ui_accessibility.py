@@ -7,6 +7,25 @@ PANEL = (Path(__file__).parents[1] / "Panel.qml").read_text()
 BAR = (Path(__file__).parents[1] / "BarWidget.qml").read_text()
 
 
+def button_blocks(source):
+    """Yield each `Button { ... }` body reduced to its own top-level lines.
+
+    Comments are dropped and nested objects (child items, handlers) are
+    collapsed, so a property only matches when it is set on the Button itself.
+    """
+    source = re.sub(r'("(?:\\.|[^"\\\n])*")|//[^\n]*|/\*.*?\*/',
+                    lambda m: m.group(1) or "", source, flags=re.S)
+    for start in re.finditer(r"\bButton\s*\{", source):
+        depth, own = 1, []
+        for ch in source[start.end():]:
+            depth += (ch == "{") - (ch == "}")
+            if depth == 0:
+                break
+            if depth == 1 and ch not in "{}":
+                own.append(ch)
+        yield "".join(own)
+
+
 class UiAccessibilityContractTests(unittest.TestCase):
     def test_panel_has_keyboard_focus_and_escape_contract(self):
         self.assertIn("focusTarget: keyCatcher", PANEL)
@@ -21,9 +40,16 @@ class UiAccessibilityContractTests(unittest.TestCase):
 
     def test_primary_actions_are_keyboard_focusable_and_labeled(self):
         labels = ("Refresh", "Configure feeds", "Mark all read", "Mark all unread", "Close", "All", "Unread", "Read", "Saved", "1 min", "5 min", "15 min", "30 min", "1 hour", "5 hours", "Add feed", "Save feeds", "Cancel", "Remove")
+        focusable = {}
+        for props in button_blocks(PANEL):
+            label = re.search(r'^\s*text: "([^"]*)"\s*$', props, re.M)
+            if label:
+                focusable.setdefault(label.group(1), []).append(
+                    re.search(r"^\s*focusable: true\s*$", props, re.M) is not None
+                )
         for label in labels:
-            self.assertIn(f'text: "{label}"', PANEL)
-        self.assertGreaterEqual(PANEL.count("focusable: true"), len(labels))
+            self.assertIn(label, focusable, f"no Button labeled {label!r}")
+            self.assertTrue(all(focusable[label]), f"Button {label!r} is not focusable")
 
     def test_feed_filter_uses_dropdown(self):
         self.assertIn("id: feedFilterDropdown", PANEL)
@@ -85,8 +111,8 @@ class UiAccessibilityContractTests(unittest.TestCase):
         # (internal/store.Upsert never overwrites the stored `read` flag);
         # the panel just filters whatever the backend returns down to the
         # feeds still configured.
-        self.assertIn("var name = root.feedDisplayName(feed)", PANEL)
-        self.assertIn("names[name] = true", PANEL)
+        self.assertIn("var name = root.feedDisplayName(config.feeds[i])", PANEL)
+        self.assertIn("root.configuredFeedNamesArray().forEach(function(name) { names[name] = true })", PANEL)
         self.assertIn("names[String(article.feed || \"\")] === true", PANEL)
 
     def test_clicking_an_article_marks_the_opened_item_read(self):

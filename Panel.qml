@@ -553,13 +553,7 @@ Panel {
 
   function configuredFeedNames() {
     var names = {}
-    if (config && Array.isArray(config.feeds)) {
-      for (var i = 0; i < config.feeds.length; i++) {
-        var feed = config.feeds[i]
-        var name = root.feedDisplayName(feed)
-        if (name !== "") names[name] = true
-      }
-    }
+    root.configuredFeedNamesArray().forEach(function(name) { names[name] = true })
     return names
   }
 
