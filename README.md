@@ -19,16 +19,18 @@ A persistent RSS reader for the Omarchy shell, built as a Quickshell plugin.
   <img src="assets/screenshots/0.3.0/FeaderSettings.png" alt="Feader RSS feed configuration panel" width="30%">
 </p>
 
-## Local installation
+## Installation
 
-To install a local copy during development:
+With Omarchy and the Go version specified in `go.mod` installed:
 
 ```bash
+git clone https://github.com/KitsuneSemCalda/Feader-RSS.git
+cd Feader-RSS
 ./scripts/install.sh
 ```
 
-The installer validates the manifest, removes the previous plugin files, and
-copies only the required files to
+The installer validates the manifest, builds the backend in a staging
+directory, and copies the required files to
 `~/.config/omarchy/plugins/io.github.kitsunesemcalda.feader-rss/`, then enables
 the widget in the right bar section. It preserves your feed configuration and
 creates a timestamped backup of the configuration, UI preferences, and SQLite
@@ -50,16 +52,14 @@ database even when it already contains articles.
 
 ## Distribution through the Omarchy plugin system
 
-The standard distribution format is a public Git repository with
-`manifest.json` at its root. After publishing this repository, users can
-install it with:
+`omarchy plugin add` copies the repository but does not run an install
+hook or build `feader-rss-fetch`. Use the installation steps above to
+install both the plugin and its backend.
 
-```bash
-omarchy plugin add https://github.com/KitsuneSemCalda/Feader-RSS.git --enable
-```
-
-Omarchy validates the manifest before copying the plugin to
-`~/.config/omarchy/plugins/`. The shell does not execute an install hook.
+Without Go, the installer downloads a release binary and verifies its
+checksum and attestation using `gh`. For a Git checkout, the binary must
+match that checkout's commit; an unreleased checkout may have no matching
+binary.
 
 The runtime requires Omarchy's Quattro shell and network access to the
 configured RSS/Atom feeds. It runs with the user's permissions inside the
