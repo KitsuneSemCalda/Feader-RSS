@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local-development installer for Feader RSS.
-# Public distribution should use: omarchy plugin add <git-url> --enable
+# Installs the Feader RSS plugin and builds or downloads its Go backend.
 
 plugin_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_id="io.github.kitsunesemcalda.feader-rss"
