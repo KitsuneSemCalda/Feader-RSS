@@ -191,14 +191,19 @@ type sqlExecer interface {
 }
 
 // rebuildFTSIfOutOfSync avoids taking the write lock on every Open: every
-// mutation already rebuilds the index, so only a missing or partial index
-// (first run, or a database predating the FTS table) needs repair.
+// mutation already rebuilds the index, so only a missing, partial or stale
+// index (first run, a database predating the FTS table, edits made outside
+// this program) needs repair. The comparison is read-only.
 func (s *Store) rebuildFTSIfOutOfSync() error {
-	var articles, indexed int
-	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM articles), (SELECT COUNT(*) FROM articles_fts)`).Scan(&articles, &indexed); err != nil {
+	const articleRows = `SELECT id, title, summary, COALESCE(content, ''), author, categories, tags FROM articles`
+	const indexRows = `SELECT id, title, summary, content, author, categories, tags FROM articles_fts`
+	var outOfSync bool
+	err := s.db.QueryRow(`SELECT EXISTS(` + articleRows + ` EXCEPT ` + indexRows + `)
+		OR EXISTS(` + indexRows + ` EXCEPT ` + articleRows + `)`).Scan(&outOfSync)
+	if err != nil {
 		return err
 	}
-	if articles == indexed {
+	if !outOfSync {
 		return nil
 	}
 	return rebuildFTS(s.db)
