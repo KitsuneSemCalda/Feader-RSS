@@ -1,294 +1,51 @@
-# Feader RSS — TODO
+# Feader RSS: pendências
 
-Objetivo: substituir `rss-fetch.py` por um binário Go (`feader-rss-fetch` ou similar),
-mantendo a mesma interface CLI (args + stdout JSON) para não precisar tocar no QML
-além de trocar `python3 rss-fetch.py` pelo caminho do binário compilado.
+A migração Python → Go e SQLite está concluída. O histórico de mudanças fica
+em [CHANGELOG.md](CHANGELOG.md) e no Git. Esta lista reúne o trabalho aberto.
 
-## 1. Setup do módulo Go
-- [x] `go mod init github.com/KitsuneSemCalda/feader-rss`
-- [x] Layout: `cmd/feader-rss-fetch/main.go` + `internal/feed`, `internal/safefetch` e `internal/article`
-- [x] `go.mod`/`go.sum` no controle de versão e `.gitignore` atualizado (binário compilado, `/bin`)
+## P0
 
-## 2. Camada de rede segura (equivalente a `require_safe_url`/pinning) — feito
-- [x] Reimplementar validação de URL: apenas `http`/`https`, hostname obrigatório
-- [x] Resolver DNS manualmente (`net.DefaultResolver.LookupNetIP`) e rejeitar IPs privados/loopback/link-local/multicast/reservados (`net/netip`, `Unmap()` cobre IPv4-mapped IPv6)
-- [x] Pinar a conexão no IP validado via `http.Transport.DialContext` customizado, mantendo SNI/verificação TLS pelo hostname original
-- [x] Revalidar e repinar cada redirect via `http.Client.CheckRedirect`
-- [x] Limitar tamanho da resposta (`ReadCapped`, erro `ErrResponseTooLarge` se exceder)
-- [x] Timeouts equivalentes aos `timeout=15`/`timeout=20` do Python (parametrizado por chamada)
-- [x] User-Agent customizado (`io.github.kitsunesemcalda.feader-rss/0.2`)
-- Testado manualmente: RSS 2.0 e Atom reais funcionam; requisição a `127.0.0.1` é bloqueada.
+- [ ] Integrar a instalação do backend ao fluxo público do Omarchy.
+  `omarchy plugin add` não executa `scripts/install.sh`, que faz build ou
+  download verificado do binário. O README agora orienta usar esse script;
+  a integração automática continua pendente.
+- [ ] Dividir `Panel.qml`, que concentra estado, configuração, processos e
+  interface. Separar as telas de lista, artigo e configuração conforme as
+  responsabilidades existentes.
+- [ ] Atualizar FTS5 por artigo. `rebuildFTS()` recria o índice inteiro em
+  várias operações de escrita; reservar o rebuild global para reparo e
+  migração. Validar com retenção de até 100.000 artigos.
 
-## 3. Parsing de feeds (RSS/Atom) — feito
-- [x] Parsear XML com `encoding/xml` cobrindo `<rss><channel><item>` e Atom `<feed><entry>`
-- [x] Extrair título, link (RSS `<link>` texto vs Atom `<link href="">`, preferindo `rel="alternate"`), data (`pubDate`/`published`/`updated`), resumo (`description`/`content:encoded` ou `summary`/`content`)
-- [x] Sanitizar resumo com parser HTML: remover tags de apresentação/script, decodificar entidades,
-  preservar parágrafos, preferir `content:encoded` e truncar em 500 runes
-- [x] Manter o formato legado do `id`: `sha256(feedName + "\x00" + link)[:24]` (compatível com o estado salvo existente);
-  a identidade independente do nome editável ficou registrada na seção 11
-- [x] Ordenar itens por `published_at` normalizado (RSS/Atom) e aplicar `--limit`
-  (feito no `internal/store` e no `cmd/feader-rss-fetch`)
-- [x] Testes automatizados (`go test`) cobrindo RSS, Atom, Unicode, links relativos e migração SQLite
+## P1
 
-## 4. Extração de artigo (equivalente ao `ArticleParser`) — feito
-- [x] `golang.org/x/net/html` para parsear o HTML da página (`internal/article`)
-- [x] Lógica de bloco/skip tags replicada (`article, br, div, h1-4, li, p, pre, section` vs `aside, footer, form, header, nav, script, style, svg`)
-- [x] Extração de `<title>` e texto legível, normalização de espaços/pontuação/linhas em branco igual ao Python
-- [x] Detecção de charset via `golang.org/x/net/html/charset` a partir do `Content-Type`
+- [ ] Versionar migrações SQLite com `PRAGMA user_version` ou uma tabela de
+  migrações, incluindo migração de identidade e importação do JSON legado.
+- [ ] Centralizar no Go as regras de configuração ainda duplicadas no QML,
+  mantendo a apresentação e coordenação da interface no QML.
+- [ ] Documentar os comandos e respostas JSON usados pelo QML. Avaliar
+  versão de protocolo e códigos de erro quando houver mudança incompatível.
+- [ ] Testar o painel no Quickshell: abrir, trocar tema, configurar feeds,
+  atualizar, filtrar, navegar pelo teclado, pesquisar, abrir artigo,
+  favoritar e fechar/reabrir. Substituir testes por busca de strings por
+  testes de comportamento onde houver suporte.
+  A validação registrada em 2026-09-03 cobriu instalação, refresh de feeds
+  reais, SQLite e ícone de não lidos; os cliques no painel ainda faltam.
+- [ ] Acrescentar diagnóstico opcional de tempos de fetch, parse, banco,
+  FTS e prefetch, com falhas identificadas por feed.
 
-## 5. CLI e formato de saída — feito (com subcomandos em vez de flags únicas)
-- [x] CLI reorganizada em subcomandos: `fetch`, `list`, `article`, `mark-read`, `mark-all` (`cmd/feader-rss-fetch/main.go`)
-- [x] Saída JSON: `{"items":[...],"errors":[...],"newItems":[...]}` para `fetch`/`list`; `{"url","title","content"}` ou `{"error","url"}` para `article`
-- [x] Erros de feed individual não abortam os demais; log em stderr
-- [x] Exit code 1 quando `article` falha
-- [x] `encoding/json` emite UTF-8 nativamente (`SetEscapeHTML(false)` para paridade com `ensure_ascii=false`)
+## P2
 
-## 6. Persistência (SQLite) — feito, além do escopo original do TODO
-- [x] `internal/store`: banco SQLite (`modernc.org/sqlite`, puro Go, sem cgo) substitui o antigo JSON de estado gerenciado em JS
-- [x] `Upsert` insere itens novos e atualiza metadados sem sobrescrever a flag `read`; retorna os itens realmente novos (para notificações)
-- [x] `List`, `MarkRead`, `MarkAllRead`, `SetContent` (cache do conteúdo extraído do artigo)
-- [x] Testes cobrindo upsert, preservação de `read`, `mark-all`, limite de `list`
-
-## 7. Build e distribuição
-- [x] `go build ./...` funcional; binário único `cmd/feader-rss-fetch`
-- [x] Compilação cross-platform via `GOOS`/`GOARCH` no workflow de release (linux/darwin × amd64/arm64), `CGO_ENABLED=0`
-- [x] `scripts/install.sh` baixa o binário já compilado da release do GitHub (não builda localmente) — ver seção 9
-
-## 8. Integração com QML — feito
-- [x] `Panel.qml`: `fetchScript` (caminho do `.py`) virou `fetchBinary` (caminho do binário compilado), resolvido via `Qt.resolvedUrl`
-- [x] `statePath` agora guarda só preferências de UI (`preferences.json`); artigos migraram para `dbPath` (`items.db`)
-- [x] `refresh()` chama `fetch --db ... --limit ...`; o merge/preservação de `read` agora acontece no backend Go, não mais em JS
-- [x] Novo `listProcess` chama `list --db ...` na inicialização para popular `articles` a partir do banco
-- [x] `markRead`/`markAllRead`/`markAllUnread` atualizam o estado local otimisticamente e persistem via `Quickshell.execDetached([...])` chamando `mark-read`/`mark-all`
-- [x] `loadArticle` chama `article --db ... <url>` em vez do script Python
-- [x] Testado manualmente via CLI (fetch → list → article → mark-read) fora do Quickshell; teste real dentro do Quickshell ainda pendente (ver Observações)
-
-## 9. Instalação e CI/CD — feito
-- [x] `scripts/install.sh`: detecta OS/arch, baixa `feader-rss-fetch_<version>_<os>_<arch>` do GitHub Release (`vX.Y.Z`), valida com `checksums.txt` via `sha256sum`
-- [x] `.github/workflows/ci.yml`: job Go separado (`go vet`, `gofmt -l`, `go test -race`, `go build`) além da validação Python existente
-- [x] `.github/workflows/release.yml`: matrix build (linux/darwin × amd64/arm64), `checksums.txt`, upload dos binários e do zip do plugin na mesma release
-
-## 10. Limpeza final
-- [x] Removidos `rss-fetch.py` e `tests/test_rss_fetch.py` (paridade coberta pelos testes Go)
-- [x] `tests/test_ui_accessibility.py` atualizado para as novas asserções de comando (`fetchBinary`, `dbPath`)
-- [x] `.gitignore` atualizado: binário compilado, `dist/`, arquivos `*.db*`
-- [x] Atualizar `README.md` (requisitos: Go em vez de Python, instruções de build/uso do binário)
-- [x] Bump de versão no `manifest.json` (necessário antes do próximo `git tag vX.Y.Z` para a release funcionar)
-
-## Observações
-- Prioridade alta: preservar exatamente as proteções de SSRF/DNS-rebinding já implementadas
-  (commits `7dca620`, `a76329f`, `09cc542`) — feito e testado em `internal/safefetch`.
-- Formato do `id` do artigo (`sha256[:24]`) preservado — compatível com qualquer estado antigo,
-  embora o formato de armazenamento tenha mudado de JSON para SQLite (arquivo `items.db`).
-- [x] Validado o fluxo dentro do Quickshell de verdade em 2026-09-03: instalado o binário local via
-  `./scripts/install.sh` (reescrito para montar em staging e trocar atomicamente), reiniciado o
-  shell, feeds reais (`hnrss.org`, `xkcd.com`) buscados de ponta a ponta pelo binário instalado, e
-  o ícone da barra refletiu corretamente o estado "não lido". O teste ao vivo encontrou e corrigiu
-  dois bugs reais: o botão de salvar/favoritar (`--value` passado como dois argumentos separados,
-  que o parser de flags do Go não aceita para booleanos) e um `TypeError` no log do Quickshell
-  (`root.searchProcess` em vez de `searchProcess` na linha de status da lista).
-- `scripts/install.sh` já depende de uma release publicada para o caminho `fetch_binary`; o
-  primeiro release (`v0.1.0` em diante) já existe, então isso não é mais um bloqueio.
-
-## 11. Auditoria do leitor e próxima fase — 2026-08-28
-
-### Concluído nesta rodada
-- [x] Normalizar datas RSS/Atom em `published_at`, mantendo o texto original para exibição.
-- [x] Migrar o schema SQLite existente sem quebrar bancos criados pela versão 0.3.0.
-- [x] Extrair autor e categorias de RSS/Atom e persistir esses metadados.
-- [x] Limpar resumos HTML com parser, removendo `script`/`style`, preservando parágrafos e
-  priorizando `content:encoded` quando o feed oferece a versão mais rica.
-- [x] Truncar resumos por rune, sem cortar sequências UTF-8.
-- [x] Resolver links relativos usando a URL do feed como base.
-- [x] Rejeitar respostas HTTP fora da faixa 2xx antes de parsear ou armazenar conteúdo.
-- [x] Unificar a resolução de nomes opcionais de feeds no QML, evitando que artigos válidos sejam filtrados fora.
-- [x] Respeitar `XDG_CONFIG_HOME` também no frontend.
-- [x] Melhorar os cards e o detalhe do artigo: estado read/unread, autor, data local, categorias,
-  resumo RSS, conteúdo completo e estados vazios mais claros.
-- [x] Remover o log `DEBUG` que era emitido a cada atualização de notificações.
-
-### Dados, migração e experiência offline
-- [x] Atualizar `scripts/backup.sh` e `scripts/restore.sh` para incluir `items.db` com backup
-  consistente de SQLite/WAL; restaurar o banco atual, não apenas o legado `items.json`.
-- [x] Adicionar testes de round-trip para backup/restore SQLite e para restauração de um backup
-  em uma instalação que já possui um banco não vazio.
-- [x] Definir retenção: `retentionItems` limita o banco sem alterar o limite de exibição de
-  `maxItems`; entradas lidas e não salvas são removidas primeiro.
-- [x] Criar contagem de não lidos no banco, para o ícone não ignorar artigos antigos fora dos
-  primeiros `maxItems`.
-- [x] Registrar falhas de prefetch com retry/backoff persistente para não repetir indefinidamente
-  as mesmas requisições a cada refresh.
-- [x] Usar todos os endereços públicos validados como fallback de conexão; hoje apenas o primeiro
-  IP retornado pelo DNS é tentado, o que pode falhar em hosts com IPv6 indisponível.
-- [x] Restringir permissões do diretório/arquivo SQLite (`0700`/`0600`) e documentar a política
-  de privacidade do cache local.
-
-### Identidade e compatibilidade de artigos
-- [x] Fazer o ID depender da identidade estável do feed (URL canônica ou ID Atom/RSS), não do
-  nome editável exibido ao usuário; preservar IDs antigos através de migração/alias.
-- [x] Deduplicar itens repetidos dentro de uma mesma resposta antes de gerar `newItems` e
-  notificações.
-- [x] Normalizar URLs de artigos com cuidado, sem alterar o caminho/query de forma incorreta,
-  e adicionar índice para consultas por URL no cache.
-
-### Configuração e frontend
-- [x] Validar e normalizar configurações carregadas de arquivo: limite de oito feeds, nomes/URLs
-  válidos, `maxItems`, intervalo e preferências com números finitos.
-- [x] Evitar que `mark all` opere silenciosamente sobre artigos de feeds removidos: a ação agora
-  se aplica somente aos feeds configurados.
-- [x] Atualizar a contagem de não lidos e o fluxo de notificações para não depender apenas do
-  subconjunto carregado na UI.
-- [ ] Executar um teste manual/automatizado real no Quickshell: abrir painel, trocar tema,
-  configurar feed, refresh, filtros, teclado, detalhe, cache e ciclo de vida do processo.
-  Parcial (2026-09-03): validado via instalação real + reinício do shell — configuração de feed,
-  refresh automático real (fetch de `hnrss.org`/`xkcd.com`), persistência SQLite e o ícone da
-  barra refletindo não-lidos, sem crashes/erros no log do Quickshell após os três fixes acima
-  (favoritar via `--value`, `root.searchProcess`, e falha silenciosa ao salvar/carregar
-  `rss-reader.json` — `configFile` não tinha `onSaveFailed`/`onLoadFailed`, então uma escrita
-  falha, como a causada por um symlink quebrado, era reportada como "Feeds saved" mesmo sem
-  persistir nada).
-  Ainda falta clicar de fato no painel (abrir, trocar tema, filtros, teclado, detalhe) — não há
-  automação segura de clique de mouse disponível neste ambiente; requer um humano ou uma sessão
-  com automação de input configurada.
-- [ ] Substituir os testes QML baseados apenas em busca de strings por testes de comportamento
-  onde a infraestrutura do Quickshell permitir.
-
-### Distribuição e supply chain
-- [x] Corrigir o workflow de release: cada job publica um checksum com nome único e o job final
-  valida e combina os quatro arquivos antes de publicar `checksums.txt`.
-- [x] Amarrar o binário instalado a uma referência imutável e revisada (commit/tag protegido,
-  digest esperado ou artefato construído a partir do source revisado). O checksum baixado da
-  mesma release mutável não é suficiente por si só. — 2026-09-15: implementado
-  `RELEASE_DIGESTS.json` na raiz do repo, mapeando `versão -> commit SHA`, mantido pelo
-  mantenedor e commitado em `master` *antes* de criar a tag. `resolve_source_digest()` em
-  `scripts/install.sh` agora lê esse arquivo via `gh api .../contents/RELEASE_DIGESTS.json?ref=master`
-  para instalações sem checkout local, em vez de resolver a tag diretamente
-  (`gh api .../commits/v$version`). `.github/workflows/release.yml` ganhou um passo
-  ("Verify RELEASE_DIGESTS.json pins this exact commit") que falha o release se a entrada
-  estiver ausente ou apontar para um commit diferente do que está sendo taggeado — isso força
-  o processo de dois passos (commitar o digest revisado, só depois taggear) em vez de deixá-lo
-  opcional. Testes cobrindo os dois lados em `tests/test_install_script.py` e
-  `tests/test_release_workflow.py`.
-- [x] Tornar a verificação de attestation explícita quanto ao workflow e ao commit de origem,
-  em vez de verificar somente o repositório com `gh attestation verify --repo`.
-- [x] Fazer o instalador montar uma cópia temporária e trocar o plugin somente depois que o
-  binário foi construído/verificado; uma falha hoje pode deixar a instalação parcialmente limpa.
-- [x] Não cair silenciosamente para um binário remoto quando o build local falha; oferecer uma
-  escolha explícita ou falhar com diagnóstico.
-- [x] Validar no CI que a versão do `manifest.json` corresponde à tag da release.
-
-### Qualidade e documentação
-- [x] Adicionar cobertura para status HTTP, metadados RSS/Atom, links relativos, Unicode e
-  migração do schema SQLite.
-- [ ] Completar a matriz de testes para redirects seguros/privados, charset, conteúdo RSS/Atom
-  completo, datas inválidas, concorrência do SQLite e CLI.
-  Redirects seguros/privados e charset já cobertos (`TestGetRedirectGuards`,
-  `internal/article`). Concorrência do SQLite coberta em 2026-09-03 por
-  `TestConcurrentMultiConnectionAccessDoesNotFailOrCorrupt` (90 goroutines,
-  cada uma com sua própria conexão contra o mesmo arquivo, misturando
-  `MarkRead`/`SetStarred`/`List` — confirma que WAL + `busy_timeout(5000)`
-  absorve a contenção real entre processos sem erros nem perda de escrita).
-  Conteúdo RSS/Atom "completo" também avançou em 2026-09-03: achado via teste
-  ao vivo (usuário reportou "lendo o rss não está bem formatado") que
-  `<noscript>` e `<template>` vazavam marcação bruta (pixels de rastreamento,
-  CSS de lazy-load, widget do Disqus) tanto no artigo completo
-  (`internal/article`) quanto no resumo RSS (`internal/feed`), já que o
-  `golang.org/x/net/html` devolve `<noscript>` como um único nó de texto
-  literal. Corrigido nos dois extratores com testes de regressão; afetava
-  ~metade (154/301) dos artigos já em cache no banco real testado.
-  Faltam datas de publicação inválidas/malformadas (não vazias) e mais
-  cobertura de CLI.
-- [x] Fazer `go test -race ./...` funcionar no ambiente de CI e registrar a versão/toolchain
-  suportada; no ambiente local de 2026-08-28 o Go 1.27 falha em `runtime/race` antes de rodar
-  os testes (`package testmain cannot find package`). — 2026-09-15: confirmado que não é mais
-  um bloqueio. O job `go` do `.github/workflows/ci.yml` já roda `go test -race ./...` a cada
-  push/PR e está verde nas últimas execuções (`gh run list`, todas `completed success` desde
-  2026-09-13); localmente, Go 1.27.1 também roda a suíte completa com `-race` sem erro. A
-  toolchain suportada é a fixada em `go.mod` (`go 1.27.0`), sem pin adicional de versão exata
-  no CI (`actions/setup-go` usa `go-version-file: go.mod`).
-- [x] Atualizar README e scripts para refletir o backup SQLite, os diretórios XDG e a sequência
-  correta de instalação/restore.
-- [ ] Marcar o bump de versão do manifest somente quando a próxima release estiver pronta.
-
-## 12. P0 — recursos de leitor e atualização esparsa — 2026-09-02
-
-- [x] Adicionar intervalos de atualização de `15 min`, `30 min`, `1 h` e `5 h`, mantendo os
-  intervalos de 1–5 minutos para compatibilidade.
-- [x] Separar limite de exibição (`maxItems`) de retenção local (`retentionItems`).
-- [x] Contar não lidos no SQLite e devolver o total por feed configurado para o painel.
-- [x] Persistir retry/backoff de prefetch e limitar novas tentativas por artigo.
-- [x] Deduplicar itens repetidos no mesmo feed antes de gerar notificações.
-- [x] Indexar título, resumo, conteúdo cacheado, metadados e tags com FTS5.
-- [x] Adicionar favoritos/salvos, tags editáveis e filtros por pasta/feed.
-- [x] Adicionar importação e exportação OPML via `feader-rss-fetch`.
-
-## 13. Backlog priorizado — 2026-09-15
-
-Backlog sem prioridade é só um cemitério de boas intenções.
-
-### P0
-
-- [ ] Corrigir de vez o fluxo de instalação pública. `omarchy plugin add ... --enable` não
-  executa hook de instalação, então o binário `feader-rss-fetch` não fica disponível
-  automaticamente após o clone — só `scripts/install.sh` resolve build/download, checksum,
-  attestation e staging, mas isso não roda sozinho no fluxo padrão do Omarchy.
-  Objetivo: alguém deveria conseguir instalar o Feader sem precisar entender por que existe
-  QML de um lado e um binário Go de outro.
-- [ ] Quebrar `Panel.qml` em módulos menores. São ~77 KB concentrando estado, filtros,
-  configuração, IPC, processos, notificações, busca, teclado e UI. Divisão sugerida, sem
-  inventar arquitetura espacial: `ReaderController.qml`, `ReaderState.qml`, `InboxView.qml`,
-  `ArticleView.qml`, `SettingsView.qml`, `ArticleCard.qml`. O arquivo deveria terminar parecendo
-  um compositor, não o Livro dos Mortos egípcio.
-- [ ] Tornar o FTS5 incremental. `rebuildFTS()` apaga e recria o índice inteiro e é chamado em
-  abertura, upsert, alteração de conteúdo, tags, pruning, importações e migrações — tranquilo
-  com 1.000 artigos, começa a ficar idiota com retenção de até 100.000. Usar triggers ou updates
-  pontuais por id; manter rebuild global só para reparo/migração.
-
-### P1
-
-- [ ] Introduzir migrations versionadas de verdade (`PRAGMA user_version` ou tabela
-  `schema_migrations`) em vez de `ensureColumns()`. Já existe JSON→SQLite, mudanças de schema e
-  migração de identidade dos artigos — a sequência ideal vira v1 → v2 → v3, não "vejamos quais
-  colunas sobreviveram ao inverno".
-- [ ] Mover mais regra de negócio do QML para Go. A separação QML→CLI→Go já é um dos pontos
-  fortes do projeto; aprofundar essa linha. Regra: QML apresenta e coordena, Go decide e
-  persiste — hoje o QML ainda sanitiza feeds, normaliza configurações e calcula estado. Melhora
-  testabilidade absurdamente.
-- [ ] Formalizar o protocolo entre QML e o backend. Hoje já existe implicitamente como
-  comandos + JSON (`fetch`, `list`, `search`, `article`, `mark-read`, `star`, etc.). Documentar
-  uma versão mínima de protocolo (`protocolVersion: 1`) e padronizar erros:
-  `{"ok":false,"code":"feed_timeout","message":"..."}`. Evita o frontend depender de mensagens
-  textuais específicas no futuro.
-- [ ] Melhorar testes reais do QML/Quickshell. A seção 11 já reconhece que parte da validação
-  ainda é busca de strings, sem cobertura comportamental real. Não automatizar cada pixel — pelo
-  menos cobrir o ciclo crítico: abrir painel → carregar banco → pesquisar → abrir artigo →
-  favoritar → fechar/reabrir.
-- [ ] Adicionar observabilidade local decente. Hoje só há `console.warn` e stderr dos
-  processos. Modo diagnóstico simples (`FEADER_RSS_DEBUG=1`) registrando tempos de fetch, parse,
-  DB, FTS, prefetch e falhas por feed. Não precisa virar OpenTelemetry num leitor RSS.
-
-### P2
-
-- [ ] Otimizar o modelo de prefetch. Hoje cacheia até 20 artigos com concorrência 3 e backoff
-  persistente. Priorizar: não lidos primeiro, artigo mais recente, feed que o usuário mais lê;
-  talvez excluir starred (já deve estar cacheado). Deixa o offline mais inteligente sem
-  infraestrutura extra.
-- [ ] Melhorar a extração de artigo. O extrator já remove `nav`, `script`, `footer`,
-  `noscript`, `template` etc. Adicionar heurísticas de densidade textual para escolher
-  `<article>`, `<main>` ou o container mais provável, sem virar um motor de browser. Reduz lixo
-  em páginas semanticamente ruins.
-- [ ] Corrigir pequenos drifts de manutenção. Confirmado em 2026-09-15:
-  `internal/safefetch/safefetch.go`'s `UserAgent` ainda diz `.../0.2` enquanto `manifest.json`
-  está em `0.3.4`; `go.mod` marca `golang.org/x/net`, `modernc.org/sqlite` e outras dependências
-  como `// indirect` mesmo sendo importadas diretamente (`internal/feed`, `internal/article`,
-  `internal/store`); e `.github/workflows/release.yml` já tenta centralizar a versão via
-  `-ldflags "-X main.version=${version}"`, mas não existe `var version` em `package main` para
-  receber isso — o `-X` é um no-op silencioso hoje (confirmado: `go build` com esse ldflag não
-  falha nem avisa, só não faz nada). Corrigir os três: declarar `var version = "dev"` em
-  `main.go` e usá-lo no `UserAgent` e num futuro `--version`, e rodar
-  `go mod tidy && git diff --exit-code` no CI.
-- [ ] Fechar o último ponto de supply chain e parar por aí. O instalador já verifica
-  provenance, workflow assinante, commit de origem e checksum, e usa staging antes de
-  substituir arquivos — isso está excelente (seção "Distribuição e supply chain" acima cobre o
-  restante, incluindo o `RELEASE_DIGESTS.json` da seção 11). Feader é um leitor RSS, não o
-  sistema de lançamento nuclear dos EUA.
+- [ ] Avaliar a ordem de prefetch: priorizar artigos não lidos e recentes,
+  respeitando os limites de concorrência e o backoff persistente.
+- [ ] Melhorar a escolha do conteúdo principal em páginas sem marcação
+  semântica adequada, com exemplos de páginas que falham no extrator atual.
+- [ ] Sincronizar a versão do User-Agent com a versão publicada. O workflow
+  passa `-X main.version`, mas o backend ainda não declara essa variável.
+  Corrigir também as dependências diretas marcadas como indiretas no `go.mod`.
+- [ ] Cobrir datas de publicação inválidas ou malformadas e ampliar os
+  testes da CLI. Redirects públicos/privados, charset e concorrência SQLite
+  já têm testes; a concorrência usa conexões independentes no mesmo arquivo.
+- [ ] Identificar se resta alguma lacuna concreta na distribuição antes de
+  acrescentar verificações. Preservar checksum, attestation, workflow e
+  commit de origem verificados pelo instalador.
+- [ ] Atualizar a versão do manifest quando a próxima release estiver pronta.
