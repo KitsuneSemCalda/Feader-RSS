@@ -109,7 +109,7 @@ func Open(path string) (*Store, error) {
 		// work with an empty history rather than refuse to open.
 		fmt.Fprintf(os.Stderr, "warning: could not migrate legacy state: %s\n", err)
 	}
-	if err := rebuildFTS(s.db); err != nil {
+	if err := s.rebuildFTSIfOutOfSync(); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("building full-text search index: %w", err)
 	}
@@ -188,6 +188,20 @@ func ensureColumns(db *sql.DB) error {
 
 type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// rebuildFTSIfOutOfSync avoids taking the write lock on every Open: every
+// mutation already rebuilds the index, so only a missing or partial index
+// (first run, or a database predating the FTS table) needs repair.
+func (s *Store) rebuildFTSIfOutOfSync() error {
+	var articles, indexed int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM articles), (SELECT COUNT(*) FROM articles_fts)`).Scan(&articles, &indexed); err != nil {
+		return err
+	}
+	if articles == indexed {
+		return nil
+	}
+	return rebuildFTS(s.db)
 }
 
 func rebuildFTS(execer sqlExecer) error {
