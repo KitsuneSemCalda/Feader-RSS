@@ -226,7 +226,7 @@ func cmdOPMLImport(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	return printJSON(map[string]interface{}{
+	return printJSON(map[string]any{
 		"imported":  importedCount,
 		"total":     len(feeds),
 		"merged":    *merge,
@@ -309,7 +309,7 @@ func writeJSONConfig(path string, config map[string]json.RawMessage) error {
 	return os.Rename(tmpPath, path)
 }
 
-func printJSON(v interface{}) int {
+func printJSON(v any) int {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(v); err != nil {
@@ -505,7 +505,10 @@ func cmdArticle(args []string) int {
 	}
 	if db != nil {
 		if id, err := db.IDForURL(url); err == nil && id != "" {
-			_ = db.SetContent(id, result.Content)
+			// Caching is best-effort; the article is still returned.
+			if err := db.SetContent(id, result.Content); err != nil {
+				fmt.Fprintf(os.Stderr, "cache content for %s: %s\n", url, err)
+			}
 		}
 	}
 	return printJSON(result)

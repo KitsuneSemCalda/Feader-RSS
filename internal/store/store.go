@@ -187,7 +187,7 @@ func ensureColumns(db *sql.DB) error {
 }
 
 type sqlExecer interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
+	Exec(query string, args ...any) (sql.Result, error)
 }
 
 func rebuildFTS(execer sqlExecer) error {
@@ -489,7 +489,7 @@ func (s *Store) search(query string, limit int, feedNames ...string) ([]feed.Ite
 		JOIN articles_fts AS f ON f.id = a.id
 		WHERE articles_fts MATCH ?
 	`
-	args := []interface{}{match}
+	args := []any{match}
 	if where, filterArgs := feedFilter(feedNames); where != "" {
 		sqlQuery += " AND " + strings.ReplaceAll(where, "feed", "a.feed")
 		args = append(args, filterArgs...)
@@ -544,7 +544,7 @@ func scanArticleRows(rows *sql.Rows) ([]feed.Item, error) {
 // currently configured feeds; omitting them counts the whole database.
 func (s *Store) UnreadCounts(feedNames ...string) (unread, unreadFeeds int, err error) {
 	where := "read = 0"
-	args := make([]interface{}, 0, len(feedNames))
+	args := make([]any, 0, len(feedNames))
 	if feedWhere, feedArgs := feedFilter(feedNames); feedWhere != "" {
 		where += " AND " + feedWhere
 		args = append(args, feedArgs...)
@@ -599,11 +599,7 @@ func (s *Store) Prune(maxItems int) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
+	placeholders, args := inClause(ids)
 	if _, err := tx.Exec(`DELETE FROM articles WHERE id IN (`+placeholders+`)`, args...); err != nil {
 		return 0, err
 	}
@@ -622,15 +618,7 @@ func (s *Store) KnownIDs(ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return known, nil
 	}
-	placeholders := ""
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		if i > 0 {
-			placeholders += ","
-		}
-		placeholders += "?"
-		args[i] = id
-	}
+	placeholders, args := inClause(ids)
 	rows, err := s.db.Query(`SELECT id FROM articles WHERE id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -757,7 +745,7 @@ func (s *Store) PendingPrefetch(limit int) ([]feed.Item, error) {
 			AND (prefetch_next_at = '' OR prefetch_next_at <= ?)
 		ORDER BY published_at DESC, first_seen DESC, id DESC
 	`
-	args := []interface{}{time.Now().UTC().Format(time.RFC3339)}
+	args := []any{time.Now().UTC().Format(time.RFC3339)}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -836,7 +824,7 @@ func (s *Store) MarkRead(id string, read bool) error {
 // supplied feeds when feed names are provided.
 func (s *Store) MarkAllRead(read bool, feedNames ...string) error {
 	query := `UPDATE articles SET read = ?`
-	args := []interface{}{boolToInt(read)}
+	args := []any{boolToInt(read)}
 	if where, filterArgs := feedFilter(feedNames); where != "" {
 		query += " WHERE " + where
 		args = append(args, filterArgs...)
@@ -910,26 +898,35 @@ func decodeTags(value string) []string {
 	return tags
 }
 
-func feedFilter(feedNames []string) (string, []interface{}) {
+func feedFilter(feedNames []string) (string, []any) {
 	if len(feedNames) == 0 {
 		return "", nil
 	}
 	seen := make(map[string]bool, len(feedNames))
-	placeholders := make([]string, 0, len(feedNames))
-	args := make([]interface{}, 0, len(feedNames))
+	names := make([]string, 0, len(feedNames))
 	for _, name := range feedNames {
 		name = strings.TrimSpace(name)
 		if name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
-		placeholders = append(placeholders, "?")
-		args = append(args, name)
+		names = append(names, name)
 	}
-	if len(placeholders) == 0 {
+	if len(names) == 0 {
 		return "1 = 0", nil
 	}
-	return "feed IN (" + strings.Join(placeholders, ",") + ")", args
+	placeholders, args := inClause(names)
+	return "feed IN (" + placeholders + ")", args
+}
+
+// inClause returns the comma-separated placeholders and matching arguments
+// for an SQL IN (...) list. values must be non-empty.
+func inClause(values []string) (string, []any) {
+	args := make([]any, len(values))
+	for i, v := range values {
+		args[i] = v
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", len(values)), ","), args
 }
 
 func deduplicateItems(items []feed.Item) []feed.Item {
