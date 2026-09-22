@@ -4,6 +4,24 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- The number of feeds you can configure is now a setting (`maxFeeds`, default
+  8, at most 100), editable under "Feed limit" in the settings page. OPML
+  import respects it.
+- The article list scrolls infinitely: 50 articles load first and the next
+  page is fetched as you approach the bottom, up to `maxItems`. `list` and
+  `search` gained an `--offset` flag for this.
+- Playful status lines: a pulsing spinner with 40 rotating verbs while
+  refreshing, a daily inbox-zero message, and varied "last updated" and
+  empty-filter messages.
+- A list footer that shows "Loading more…", "Scroll for more" or
+  "that's everything", plus a "Back to top" button on long lists.
+
+### Changed
+- Leaner panel header: the mark-all button now shows only the relevant action
+  (read or unread) on the same row as Refresh, the duplicated unread line is
+  gone, and the shortcuts hint moved below the list.
+
 ## [0.3.4] - 2026-09-15
 
 ### Changed

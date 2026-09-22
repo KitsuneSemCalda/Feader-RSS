@@ -75,6 +75,7 @@ Create `~/.config/omarchy/rss-reader.json`:
 
 ```json
 {
+  "maxFeeds": 8,
   "maxItems": 200,
   "retentionItems": 1000,
   "refreshMinutes": 5,
@@ -82,7 +83,11 @@ Create `~/.config/omarchy/rss-reader.json`:
 }
 ```
 
-`maxItems` controls how many articles the panel displays. `retentionItems`
+`maxFeeds` is how many feeds you can configure (default `8`, at most `100`); it
+is also editable under "Feed limit" in the settings page, and OPML imports are
+capped by it. `maxItems` is the most articles the panel loads. The list loads
+50 at a time and fetches the next page as you scroll toward the bottom, up to
+`maxItems`. `retentionItems`
 controls how many articles are kept in SQLite; use `0` to keep everything.
 Read and unsaved articles are pruned before unread or saved articles.
 

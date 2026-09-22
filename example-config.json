@@ -1,4 +1,5 @@
 {
+  "maxFeeds": 8,
   "maxItems": 200,
   "retentionItems": 1000,
   "refreshMinutes": 5,
