@@ -4,6 +4,8 @@ All notable changes to Feader RSS are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-21
+
 ### Added
 - The number of feeds you can configure is now a setting (`maxFeeds`, default
   8, at most 100), editable under "Feed limit" in the settings page. OPML
