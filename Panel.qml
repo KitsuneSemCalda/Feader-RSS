@@ -30,7 +30,7 @@ Panel {
   readonly property string fetchBinary: Qt.resolvedUrl("feader-rss-fetch").toString().replace(/^file:\/\//, "")
 
   property var config: ({
-    feeds: [], maxItems: 200, retentionItems: 1000, refreshMinutes: 5,
+    feeds: [], maxFeeds: 8, maxItems: 200, retentionItems: 1000, refreshMinutes: 5,
     scrollStep: 54, panelGap: Style.gapsOut
   })
   property var articles: []
@@ -57,6 +57,7 @@ Panel {
   property bool preferencesReady: false
   property int refreshMinutesDraft: 5
   property int retentionItemsDraft: 1000
+  property int maxFeedsDraft: 8
   property real scrollStepDraft: 54
   property string pendingConfirm: ""
   property int globalUnreadCount: -1
@@ -100,6 +101,8 @@ Panel {
     var value = Math.floor(Number(config && config.retentionItems))
     return isFinite(value) && value >= 0 ? Math.min(100000, value) : 1000
   }
+  // How many feeds may be configured; mirrors opml.ResolveMaxFeeds.
+  readonly property int resolvedMaxFeeds: root.normalizeMaxFeeds(config && config.maxFeeds)
   readonly property int resolvedMaxItems: {
     var value = Math.floor(Number(config && config.maxItems))
     return isFinite(value) && value > 0 ? Math.min(100000, value) : 200
@@ -253,14 +256,19 @@ Panel {
   }
 
   // Bounds and validates feeds coming from disk — a hand-edited config file
-  // or an OPML import can carry more than 8 entries, non-http(s) URLs, or
+  // or an OPML import can carry more than maxFeeds entries, non-http(s) URLs, or
   // duplicates that the settings form would otherwise have rejected.
-  function sanitizeFeeds(rawFeeds) {
+  function normalizeMaxFeeds(value) {
+    var numeric = Math.floor(Number(value))
+    return isFinite(numeric) && numeric > 0 ? Math.min(100, numeric) : 8
+  }
+
+  function sanitizeFeeds(rawFeeds, limit) {
     var feeds = []
     if (!Array.isArray(rawFeeds)) return feeds
     var seenUrls = {}
     var seenNames = {}
-    for (var i = 0; i < rawFeeds.length && feeds.length < 8; i++) {
+    for (var i = 0; i < rawFeeds.length && feeds.length < limit; i++) {
       var feed = rawFeeds[i]
       if (!feed) continue
       var url = root.trimmed(feed.url)
@@ -279,8 +287,10 @@ Panel {
   function loadConfig(raw) {
     var value = loadJson(raw, null)
     if (value && Array.isArray(value.feeds)) {
-      var feeds = root.sanitizeFeeds(value.feeds)
-      root.config = Object.assign({}, value, { feeds: feeds })
+      var maxFeeds = root.normalizeMaxFeeds(value.maxFeeds)
+      var feeds = root.sanitizeFeeds(value.feeds, maxFeeds)
+      root.config = Object.assign({}, value, { feeds: feeds, maxFeeds: maxFeeds })
+      maxFeedsDraft = maxFeeds
       refreshMinutesDraft = root.normalizeRefreshMinutes(value.refreshMinutes || 5)
       retentionItemsDraft = root.resolvedRetentionItems
       feedModel.clear()
@@ -299,6 +309,7 @@ Panel {
     refreshMinutesDraft = root.normalizeRefreshMinutes(config.refreshMinutes || 5)
     retentionItemsDraft = root.resolvedRetentionItems
     scrollStepDraft = root.resolvedScrollStep
+    maxFeedsDraft = root.resolvedMaxFeeds
   }
 
   function closeSettings() {
@@ -324,8 +335,8 @@ Panel {
   }
 
   function addFeed() {
-    if (feedModel.count >= 8) {
-      status = "You can configure up to 8 feeds."
+    if (feedModel.count >= maxFeedsDraft) {
+      status = "You can configure up to " + maxFeedsDraft + " feeds."
       return
     }
     feedModel.append({ name: "", url: "", folder: "" })
@@ -336,6 +347,10 @@ Panel {
   }
 
   function saveConfig() {
+    if (feedModel.count > maxFeedsDraft) {
+      status = "Remove " + (feedModel.count - maxFeedsDraft) + " feed(s) or raise the feed limit to " + feedModel.count + "."
+      return
+    }
     var feeds = []
     var seenUrls = {}
     var seenNames = {}
@@ -362,6 +377,7 @@ Panel {
     }
     root.config = Object.assign({}, root.config, {
       feeds: feeds,
+      maxFeeds: maxFeedsDraft,
       maxItems: root.resolvedMaxItems,
       retentionItems: retentionItemsDraft,
       refreshMinutes: root.normalizeRefreshMinutes(refreshMinutesDraft),
@@ -457,6 +473,12 @@ Panel {
 
   function setRefreshMinutes(value) {
     refreshMinutesDraft = root.normalizeRefreshMinutes(value)
+  }
+
+  function setMaxFeeds(value) {
+    // An emptied field is mid-edit, not a request for the default.
+    if (String(value).trim() === "") return
+    maxFeedsDraft = root.normalizeMaxFeeds(value)
   }
 
   function setRetentionItems(value) {
@@ -1875,6 +1897,31 @@ Panel {
 
         PanelSeparator { foreground: root.foreground }
 
+        PanelSectionHeader {
+          text: "FEED LIMIT"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Text {
+          width: parent.width
+          text: "How many feeds you can configure (1-100). Lowering it never removes feeds; remove them yourself first."
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        TextField {
+          width: parent.width
+          text: String(root.maxFeedsDraft)
+          foreground: root.foreground
+          placeholderText: "Maximum feeds (1-100)"
+          inputMethodHints: Qt.ImhDigitsOnly
+          onTextChanged: if (activeFocus) root.setMaxFeeds(text)
+          onActiveFocusChanged: root.formControlFocused = activeFocus
+        }
+
+        PanelSeparator { foreground: root.foreground }
+
         Flow {
           width: parent.width
           spacing: Style.space(8)
@@ -1884,7 +1931,7 @@ Panel {
             fontFamily: root.fontFamily
           }
           Text {
-            text: feedModel.count + "/8"
+            text: feedModel.count + "/" + root.maxFeedsDraft
             color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
           }
         }

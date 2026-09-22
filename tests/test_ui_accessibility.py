@@ -47,7 +47,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
             self.assertTrue(all(focusable[label]), f"Button {label!r} is not focusable")
 
     def test_panel_does_not_bundle_default_feeds(self):
-        self.assertIn("feeds: [], maxItems: 200, retentionItems: 1000, refreshMinutes: 5,", PANEL)
+        self.assertIn("feeds: [], maxFeeds: 8, maxItems: 200, retentionItems: 1000, refreshMinutes: 5,", PANEL)
         self.assertNotIn("lwn.net/headlines/rss", PANEL)
         self.assertNotIn("omarchy.org/feed.xml", PANEL)
 
