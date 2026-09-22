@@ -1333,12 +1333,6 @@ Panel {
           }
 
           Text {
-            text: root.unreadCount + " unread · " + root.unreadFeedCount + " feeds"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-          Text {
             text: searchProcess.running ? "Searching saved articles…"
               : (root.unreadCount === 0 ? "All caught up" : "Open an article to mark it read")
             color: root.dim
@@ -1392,14 +1386,9 @@ Panel {
           onActiveFocusChanged: root.formControlFocused = activeFocus
           onClicked: root.close()
         }
-      }
-
-      Flow {
-        visible: !root.detailOpen && !root.settingsOpen
-        spacing: Style.space(8)
-        width: parent.width
         Button {
           text: "Mark all read"
+          visible: root.unreadCount > 0
           iconText: "✓"
           tooltipText: "Mark every configured article as read"
           foreground: root.foreground
@@ -1409,6 +1398,7 @@ Panel {
         }
         Button {
           text: "Mark all unread"
+          visible: root.unreadCount <= 0
           iconText: "↺"
           tooltipText: "Mark every configured article as unread"
           foreground: root.foreground
@@ -1416,13 +1406,6 @@ Panel {
           onActiveFocusChanged: root.formControlFocused = activeFocus
           onClicked: root.requestConfirm("markAllUnread")
         }
-      }
-
-      Text {
-        visible: !root.detailOpen && !root.settingsOpen
-        text: root.shortcutsHint()
-        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap; width: parent.width
       }
 
       Flow {
@@ -1821,6 +1804,13 @@ Panel {
               onClicked: { root.selectedIndex = index; root.showArticle(modelData) }
             }
           }
+        }
+
+        Text {
+          width: parent.width
+          text: root.shortcutsHint()
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
       }
 
