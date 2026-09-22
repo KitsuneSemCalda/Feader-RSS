@@ -111,6 +111,28 @@ func TestRunReportsUsageUnknownCommandsAndStringLists(t *testing.T) {
 	}
 }
 
+func TestCLIListOffsetPagesThroughArticles(t *testing.T) {
+	dbPath, _ := seedCLIDB(t)
+	var first, second snapshot
+	stdout, _, code := captureCLI(t, func() int {
+		return run([]string{"list", "--db", dbPath, "--limit", "1"})
+	})
+	if code != 0 {
+		t.Fatalf("list page 1: code=%d", code)
+	}
+	decodeCLIJSON(t, stdout, &first)
+	stdout, _, code = captureCLI(t, func() int {
+		return run([]string{"list", "--db", dbPath, "--limit", "1", "--offset", "1"})
+	})
+	if code != 0 {
+		t.Fatalf("list page 2: code=%d", code)
+	}
+	decodeCLIJSON(t, stdout, &second)
+	if len(first.Items) != 1 || len(second.Items) != 1 || first.Items[0].ID == second.Items[0].ID {
+		t.Fatalf("pages overlap or are empty: %+v / %+v", first.Items, second.Items)
+	}
+}
+
 func TestCLIListSearchAndMutationCommands(t *testing.T) {
 	dbPath, _ := seedCLIDB(t)
 

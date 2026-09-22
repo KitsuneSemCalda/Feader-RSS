@@ -3,8 +3,8 @@
 // Quickshell UI. Usage:
 //
 //	feader-rss-fetch fetch --db PATH [--limit N] [--retention N] name1 url1 name2 url2 ...
-//	feader-rss-fetch list --db PATH [--limit N] [--feed NAME ...]
-//	feader-rss-fetch search --db PATH --query QUERY [--limit N] [--feed NAME ...]
+//	feader-rss-fetch list --db PATH [--limit N] [--offset N] [--feed NAME ...]
+//	feader-rss-fetch search --db PATH --query QUERY [--limit N] [--offset N] [--feed NAME ...]
 //	feader-rss-fetch article [--db PATH] URL
 //	feader-rss-fetch prefetch --db PATH [--limit N] [--concurrency N]
 //	feader-rss-fetch mark-read --db PATH ID
@@ -404,6 +404,7 @@ func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	dbPath := fs.String("db", "", "path to the SQLite state database")
 	limit := fs.Int("limit", 200, "maximum number of items to return")
+	offset := fs.Int("offset", 0, "number of items to skip")
 	var feedNames stringList
 	fs.Var(&feedNames, "feed", "only include this feed (repeatable)")
 	fs.Parse(args)
@@ -419,7 +420,7 @@ func cmdList(args []string) int {
 	}
 	defer db.Close()
 
-	items, err := db.List(*limit, feedNames...)
+	items, err := db.ListPage(*limit, *offset, feedNames...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -437,6 +438,7 @@ func cmdSearch(args []string) int {
 	dbPath := fs.String("db", "", "path to the SQLite state database")
 	query := fs.String("query", "", "full-text query")
 	limit := fs.Int("limit", 200, "maximum number of items to return")
+	offset := fs.Int("offset", 0, "number of items to skip")
 	var feedNames stringList
 	fs.Var(&feedNames, "feed", "only include this feed (repeatable)")
 	fs.Parse(args)
@@ -452,7 +454,7 @@ func cmdSearch(args []string) int {
 	}
 	defer db.Close()
 
-	items, err := db.SearchForFeeds(*query, *limit, feedNames...)
+	items, err := db.SearchPage(*query, *limit, *offset, feedNames...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
