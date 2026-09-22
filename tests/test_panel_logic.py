@@ -14,7 +14,7 @@ from pathlib import Path
 PANEL = (Path(__file__).parents[1] / "Panel.qml").read_text()
 
 FUNCTIONS = [
-    "normalizeMaxFeeds", "sanitizeFeeds", "addFeed", "setMaxFeeds",
+    "normalizeMaxFeeds", "sanitizeFeeds", "addFeed", "setMaxFeeds", "firstPageLimit", "currentPageLimit", "replaceArticles", "loadMore", "appendMore", "maybeLoadMore",
 ]
 
 
@@ -98,6 +98,118 @@ class FeedLimitTests(unittest.TestCase):
           return [a, b, c];
         """)
         self.assertEqual(got, [12, 12, 30])
+
+
+@unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")
+class InfiniteScrollTests(unittest.TestCase):
+    ITEMS = "Array.from({length: %d}, (_, i) => ({ id: 'a' + (%d + i), feed: 'A' }))"
+
+    def test_first_page_is_capped_by_page_size_and_max_items(self):
+        got = run_js("""
+          const a = firstPageLimit();
+          resolvedMaxItems = 20;
+          return [a, firstPageLimit()];
+        """)
+        self.assertEqual(got, [50, 20])
+
+    def test_refresh_keeps_what_was_scrolled_but_never_exceeds_max_items(self):
+        got = run_js("""
+          const out = [currentPageLimit()];
+          loadedCount = 150; out.push(currentPageLimit());
+          loadedCount = 900; out.push(currentPageLimit());
+          return out;
+        """)
+        self.assertEqual(got, [50, 150, 200])
+
+    def test_full_first_page_enables_more_and_a_short_one_does_not(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50); const full = moreAvailable;
+          replaceArticles({self.ITEMS % (10, 0)}, 50); const short = moreAvailable;
+          replaceArticles({self.ITEMS % (200, 0)}, 200); const capped = moreAvailable;
+          return [full, short, capped, loadedCount];
+        """)
+        self.assertEqual(got, [True, False, False, 200])
+
+    def test_load_more_requests_the_next_offset_for_list_and_search(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          loadMore(); const list = moreProcess.command.slice();
+          moreProcess.running = false; loadingMore = false;
+          searchResultsActive = true; searchProcessQuery = 'rust';
+          loadMore(); const search = moreProcess.command.slice();
+          return {{ list, search }};
+        """)
+        self.assertEqual(got["list"], ["bin", "list", "--db", "db", "--limit", "50", "--offset", "50",
+                                       "--feed", "A", "--feed", "B"])
+        self.assertEqual(got["search"][:6], ["bin", "search", "--db", "db", "--query", "rust"])
+        self.assertIn("--offset", got["search"])
+
+    def test_last_page_is_trimmed_to_max_items(self):
+        got = run_js(f"""
+          resolvedMaxItems = 120;
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          loadedCount = 100; moreAvailable = true; loadMore();
+          return moreRequestSize;
+        """)
+        self.assertEqual(got, 20)
+
+    def test_append_adds_new_rows_skips_duplicates_and_stops_when_exhausted(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          loadMore();
+          const page = {self.ITEMS % (50, 45)};   // overlaps the last 5 rows
+          appendMore(JSON.stringify({{ items: page }}));
+          const afterFirst = [articles.length, loadedCount, moreAvailable, loadingMore];
+          moreRequestSize = 50; moreRequestGeneration = pagesGeneration; loadingMore = true;
+          appendMore(JSON.stringify({{ items: [] }}));
+          return [afterFirst, moreAvailable];
+        """)
+        self.assertEqual(got, [[95, 100, True, False], False])
+
+    def test_stale_page_is_ignored_after_the_list_is_replaced(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          loadMore();
+          replaceArticles({self.ITEMS % (50, 1000)}, 50);   // e.g. a refresh landed
+          appendMore(JSON.stringify({{ items: {self.ITEMS % (50, 50)} }}));
+          return [articles.length, loadedCount, articles[0].id, loadingMore];
+        """)
+        self.assertEqual(got, [50, 50, "a1000", False])
+
+    def test_bad_payload_disables_paging_instead_of_looping(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          loadMore(); appendMore('not json');
+          return [moreAvailable, articles.length];
+        """)
+        self.assertEqual(got, [False, 50])
+
+    def test_no_paging_while_busy_or_in_settings_or_detail(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          const blocked = [];
+          for (const key of ['loadingMore', 'loading', 'settingsOpen', 'detailOpen']) {{
+            root[key] = true; moreProcess.command = null; loadMore();
+            blocked.push(moreProcess.command === null); root[key] = false;
+          }}
+          listProcess.running = true; loadMore(); blocked.push(moreProcess.command === null);
+          return blocked;
+        """)
+        self.assertEqual(got, [True] * 5)
+
+    def test_scrolling_near_the_bottom_triggers_a_load(self):
+        got = run_js(f"""
+          replaceArticles({self.ITEMS % (50, 0)}, 50);
+          scrollArea.contentY = 100; maybeLoadMore(); const far = moreProcess.command;
+          scrollArea.contentY = 500; maybeLoadMore(); const near = moreProcess.command;
+          return [far === null, near !== null];
+        """)
+        self.assertEqual(got, [True, True])
+
+    def test_panel_wires_scrolling_and_the_process_up(self):
+        self.assertIn("onContentYChanged: root.maybeLoadMore()", PANEL)
+        self.assertIn("id: moreProcess", PANEL)
+        self.assertIn("onStreamFinished: root.appendMore(text)", PANEL)
 
 
 if __name__ == "__main__":

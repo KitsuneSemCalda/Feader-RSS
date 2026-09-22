@@ -53,7 +53,7 @@ class UiAccessibilityContractTests(unittest.TestCase):
 
     def test_empty_feed_configuration_does_not_restore_cached_articles(self):
         self.assertIn("if (!config || !Array.isArray(config.feeds) || config.feeds.length === 0)", PANEL)
-        self.assertIn("root.articles = []", PANEL)
+        self.assertIn("root.replaceArticles([], 1)", PANEL)
 
     def test_theme_tokens_and_notification_helper_are_used(self):
         self.assertNotIn("Color.primary", PANEL)

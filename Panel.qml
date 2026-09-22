@@ -63,6 +63,17 @@ Panel {
   property int globalUnreadCount: -1
   property int globalUnreadFeedCount: -1
   property bool searchResultsActive: false
+  // Infinite scroll: articles arrive articlePageSize at a time (up to
+  // resolvedMaxItems in total). loadedCount is how many rows the database
+  // has handed over, i.e. the next --offset; pagesGeneration invalidates a
+  // page request that was in flight when the list was replaced.
+  readonly property int articlePageSize: 50
+  property int loadedCount: 0
+  property bool moreAvailable: false
+  property bool loadingMore: false
+  property int moreRequestSize: 0
+  property int pagesGeneration: 0
+  property int moreRequestGeneration: 0
   property string searchProcessQuery: ""
   property string tagDraft: ""
   property int searchDebounceMs: 180
@@ -405,7 +416,7 @@ Panel {
     }
     preferencesReady = true
     if (!config || !Array.isArray(config.feeds) || config.feeds.length === 0) {
-      root.articles = []
+      root.replaceArticles([], 1)
       return
     }
     if (searchQuery.trim() !== "") root.requestSearch()
@@ -525,12 +536,68 @@ Panel {
     return false
   }
 
+  function firstPageLimit() {
+    return Math.min(root.articlePageSize, root.resolvedMaxItems)
+  }
+
+  // A refresh keeps everything the reader has already scrolled through
+  // instead of snapping back to the first page.
+  function currentPageLimit() {
+    return Math.min(root.resolvedMaxItems, Math.max(root.firstPageLimit(), root.loadedCount))
+  }
+
+  // Replaces the article list with a freshly loaded first page (or refresh)
+  // of `rawItems`, which was requested with `limit`.
+  function replaceArticles(rawItems, limit) {
+    pagesGeneration++
+    loadedCount = rawItems.length
+    moreAvailable = rawItems.length >= limit && rawItems.length < root.resolvedMaxItems
+    root.articles = filterToConfiguredFeeds(rawItems)
+  }
+
+  function loadMore() {
+    if (!moreAvailable || loadingMore || loading || !preferencesReady || root.settingsOpen || root.detailOpen) return
+    if (listProcess.running || searchProcess.running || moreProcess.running) return
+    var size = Math.min(root.articlePageSize, root.resolvedMaxItems - loadedCount)
+    if (size <= 0) { moreAvailable = false; return }
+    var command = searchResultsActive
+      ? [fetchBinary, "search", "--db", dbPath, "--query", searchProcessQuery]
+      : [fetchBinary, "list", "--db", dbPath]
+    command.push("--limit", String(size), "--offset", String(loadedCount))
+    var names = root.configuredFeedNamesArray()
+    for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
+    moreRequestSize = size
+    moreRequestGeneration = pagesGeneration
+    loadingMore = true
+    moreProcess.command = command
+    moreProcess.running = true
+  }
+
+  function appendMore(raw) {
+    loadingMore = false
+    if (moreRequestGeneration !== pagesGeneration) return
+    var result = loadJson(raw, null)
+    if (!result || !Array.isArray(result.items)) { moreAvailable = false; return }
+    loadedCount += result.items.length
+    moreAvailable = result.items.length >= moreRequestSize && loadedCount < root.resolvedMaxItems
+    var seen = {}
+    for (var i = 0; i < articles.length; i++) seen[articles[i].id] = true
+    var fresh = filterToConfiguredFeeds(result.items).filter(function(article) { return !seen[article.id] })
+    if (fresh.length > 0) root.articles = articles.concat(fresh)
+  }
+
+  function maybeLoadMore() {
+    if (!moreAvailable || root.settingsOpen || root.detailOpen) return
+    if (scrollArea.contentHeight - scrollArea.contentY - scrollArea.height < scrollArea.height)
+      root.loadMore()
+  }
+
   function refresh() {
     if (fetchProcess.running || !config || !Array.isArray(config.feeds) || !config.feeds.length) return
     loading = true
     status = "Refreshing…"
     var command = [fetchBinary, "fetch", "--db", dbPath,
-      "--limit", String(root.resolvedMaxItems),
+      "--limit", String(root.currentPageLimit()),
       "--retention", String(root.resolvedRetentionItems)]
     for (var i = 0; i < config.feeds.length; i++) {
       var feed = config.feeds[i]
@@ -542,7 +609,7 @@ Panel {
 
   function loadInitialArticles() {
     if (listProcess.running) return
-    var command = [fetchBinary, "list", "--db", dbPath, "--limit", String(root.resolvedMaxItems)]
+    var command = [fetchBinary, "list", "--db", dbPath, "--limit", String(root.firstPageLimit())]
     var names = root.configuredFeedNamesArray()
     for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
     listProcess.command = command
@@ -570,7 +637,7 @@ Panel {
     if (searchProcess.running) return
     searchProcessQuery = searchQuery
     var command = [fetchBinary, "search", "--db", dbPath,
-      "--query", searchProcessQuery, "--limit", String(root.resolvedMaxItems)]
+      "--query", searchProcessQuery, "--limit", String(root.firstPageLimit())]
     var names = root.configuredFeedNamesArray()
     for (var i = 0; i < names.length; i++) command.push("--feed", names[i])
     searchProcess.command = command
@@ -598,7 +665,7 @@ Panel {
     feedErrors = Array.isArray(result.errors) ? result.errors : []
     root.applySnapshotStats(result)
     searchResultsActive = false
-    root.articles = filterToConfiguredFeeds(result.items)
+    root.replaceArticles(result.items, root.currentPageLimit())
     selectedIndex = Math.min(selectedIndex, Math.max(0, visibleArticles.length - 1))
     root.notifyNewPosts(Array.isArray(result.newItems) ? result.newItems : [])
     loading = false
@@ -638,7 +705,7 @@ Panel {
       return
     }
     searchResultsActive = false
-    root.articles = filterToConfiguredFeeds(items)
+    root.replaceArticles(items, root.firstPageLimit())
     root.prefetchArticles()
     root.updateUnreadNotification()
   }
@@ -652,7 +719,7 @@ Panel {
     root.applySnapshotStats(result)
     var items = (result && Array.isArray(result.items)) ? result.items : []
     searchResultsActive = true
-    root.articles = filterToConfiguredFeeds(items)
+    root.replaceArticles(items, root.firstPageLimit())
     selectedIndex = Math.min(selectedIndex, Math.max(0, visibleArticles.length - 1))
     root.updateUnreadNotification()
   }
@@ -1018,6 +1085,19 @@ Panel {
     }
   }
 
+  Process {
+    id: moreProcess
+    onExited: running = false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.appendMore(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("io.github.kitsunesemcalda.feader-rss", text.trim())
+    }
+  }
+
   Timer {
     id: searchDebounce
     interval: root.searchDebounceMs
@@ -1145,6 +1225,8 @@ Panel {
       flickDeceleration: 6000
       maximumFlickVelocity: 2000
       Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+      onContentYChanged: root.maybeLoadMore()
+      onContentHeightChanged: root.maybeLoadMore()
 
       WheelHandler {
         // Flickable's own wheel handling moves the content by a large,
