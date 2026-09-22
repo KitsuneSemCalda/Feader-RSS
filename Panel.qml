@@ -73,6 +73,8 @@ Panel {
   property bool loadingMore: false
   property int moreRequestSize: 0
   property int pagesGeneration: 0
+  property int spinnerTick: 0
+  property int spinnerSeed: 0
   property int moreRequestGeneration: 0
   property string searchProcessQuery: ""
   property string tagDraft: ""
@@ -586,6 +588,79 @@ Panel {
     if (fresh.length > 0) root.articles = articles.concat(fresh)
   }
 
+  // Every whimsical line lives here so the pools are easy to extend. Plain
+  // text only: color emoji fall back to a different font than the panel's.
+  function phrasePool(kind) {
+    var pools = {
+      loading: [
+        "Fetching", "Pondering", "Simmering", "Herding feeds", "Untangling RSS",
+        "Reticulating splines", "Sniffing out news", "Brewing", "Scouting",
+        "Foraging headlines", "Consulting the oracle", "Warming up the pixels",
+        "Tickling the servers", "Chasing bytes", "Bribing the CDN", "Summoning articles",
+        "Sharpening pencils", "Polishing headlines", "Waking the hamsters",
+        "Decoding XML", "Skimming the internet", "Rummaging through feeds",
+        "Whispering to the routers", "Counting angle brackets", "Stirring the cauldron",
+        "Knocking on ports", "Feeding the parser", "Dusting off the archives",
+        "Tuning the antenna", "Catching packets", "Ironing out the wrinkles",
+        "Hunting for scoops", "Unfolding the paper", "Spinning up gossip",
+        "Rehydrating articles", "Asking nicely", "Wrangling Atom", "Cooking up updates",
+        "Following the breadcrumbs", "Making tea for the scraper"
+      ],
+      caughtUp: [
+        "All caught up", "Inbox zero. Go stretch.", "Nothing new. Enjoy the quiet.",
+        "You read it all. Impressive.", "All clear. New posts will land here.",
+        "The internet is officially finished.", "Zero unread. Legendary.",
+        "Go drink some water.", "Nothing left. Touch some grass.",
+        "Quiet on the feed front.", "You win. Come back later.",
+        "Clean slate. Feels good.", "Even the feeds are impressed.",
+        "Read everything. What now?", "Peace and quiet, brought to you by RSS."
+      ],
+      refreshed: [
+        "Fresh as of", "Just in at", "Updated at", "Hot off the press at",
+        "Synced at", "Latest at", "Straight from the wire at", "Newly baked at"
+      ],
+      empty: [
+        "No articles match the current filters.", "Nothing here. Try loosening the filters.",
+        "Crickets. Adjust the filters?", "No matches. The filters are strict today."
+      ]
+    }
+    return pools[kind] || []
+  }
+
+  function pickPhrase(kind, n) {
+    var pool = root.phrasePool(kind)
+    if (pool.length === 0) return ""
+    return pool[Math.abs(Math.floor(Number(n)) || 0) % pool.length]
+  }
+
+  // Keyed by day so it stays put while the panel is open and changes on its
+  // own tomorrow.
+  function caughtUpMessage(day) {
+    return root.pickPhrase("caughtUp", day)
+  }
+
+  function refreshedLabel(time, seed) {
+    return root.pickPhrase("refreshed", seed) + " " + time
+  }
+
+  // Claude Code-style busy line: a glyph that pulses every tick and a verb
+  // that changes every ~2s.
+  function spinnerGlyph(tick) {
+    var frames = ["·", "✢", "✶", "✻", "✽", "✻", "✶", "✢"]
+    return frames[Math.abs(Math.floor(Number(tick)) || 0) % frames.length]
+  }
+
+  function loadingLabel(tick, seed) {
+    var step = Math.floor((Math.abs(Math.floor(Number(tick)) || 0)) / 14)
+    return root.spinnerGlyph(tick) + " " + root.pickPhrase("loading", step + (Number(seed) || 0)) + "…"
+  }
+
+  function listFooterText(count) {
+    if (loadingMore) return root.spinnerGlyph(spinnerTick) + " Loading more…"
+    if (moreAvailable) return "Scroll for more"
+    return count + (count === 1 ? " article" : " articles") + " · that's everything"
+  }
+
   function maybeLoadMore() {
     if (!moreAvailable || root.settingsOpen || root.detailOpen) return
     if (scrollArea.contentHeight - scrollArea.contentY - scrollArea.height < scrollArea.height)
@@ -595,6 +670,7 @@ Panel {
   function refresh() {
     if (fetchProcess.running || !config || !Array.isArray(config.feeds) || !config.feeds.length) return
     loading = true
+    spinnerSeed = Math.floor(Math.random() * 1000)
     status = "Refreshing…"
     var command = [fetchBinary, "fetch", "--db", dbPath,
       "--limit", String(root.currentPageLimit()),
@@ -672,7 +748,7 @@ Panel {
     lastUpdated = new Date().toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
     status = feedErrors.length
       ? feedErrors.length + " feed(s) failed · " + lastUpdated
-      : lastUpdated
+      : root.refreshedLabel(lastUpdated, spinnerSeed)
     root.prefetchArticles()
     root.updateUnreadNotification()
     if (searchQuery.trim() !== "") root.requestSearch()
@@ -1145,6 +1221,13 @@ Panel {
   }
 
   Timer {
+    interval: 140
+    running: root.loading || root.loadingMore
+    repeat: true
+    onTriggered: root.spinnerTick++
+  }
+
+  Timer {
     interval: root.refreshSeconds * 1000
     running: true
     repeat: true
@@ -1265,7 +1348,7 @@ Panel {
         Text {
           id: statusLabel
           width: Math.min(implicitWidth, parent.width)
-          text: root.loading ? "Refreshing…" : root.status
+          text: root.loading ? root.loadingLabel(root.spinnerTick, root.spinnerSeed) : root.status
           color: root.dim; font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap
         }
@@ -1334,7 +1417,7 @@ Panel {
 
           Text {
             text: searchProcess.running ? "Searching saved articles…"
-              : (root.unreadCount === 0 ? "All caught up" : "Open an article to mark it read")
+              : (root.unreadCount === 0 ? root.caughtUpMessage(Math.floor(Date.now() / 86400000)) : "Open an article to mark it read")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1579,7 +1662,7 @@ Panel {
         text: root.loading ? "Fetching articles…" : (!root.config.feeds.length
           ? "No feeds configured yet. Add a source to start reading."
           : (root.articles.length
-            ? "No articles match the current filters."
+            ? root.pickPhrase("empty", spinnerSeed)
             : "Your feeds are configured, but no articles have been saved yet. Try Refresh."))
         color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
         wrapMode: Text.WordWrap; width: parent.width
@@ -1803,6 +1886,26 @@ Panel {
               onExited: articleCard.cardHovered = false
               onClicked: { root.selectedIndex = index; root.showArticle(modelData) }
             }
+          }
+        }
+
+        Flow {
+          visible: root.visibleArticles.length > 0
+          width: parent.width
+          spacing: Style.space(8)
+          Text {
+            text: root.listFooterText(root.visibleArticles.length)
+            color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            verticalAlignment: Text.AlignVCenter
+          }
+          Button {
+            visible: !root.moreAvailable && root.visibleArticles.length > 10
+            text: "Back to top"
+            iconText: "↑"
+            foreground: root.foreground
+            focusable: true
+            onActiveFocusChanged: root.formControlFocused = activeFocus
+            onClicked: scrollArea.contentY = 0
           }
         }
 

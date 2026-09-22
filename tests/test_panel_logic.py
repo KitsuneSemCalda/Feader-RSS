@@ -14,7 +14,8 @@ from pathlib import Path
 PANEL = (Path(__file__).parents[1] / "Panel.qml").read_text()
 
 FUNCTIONS = [
-    "normalizeMaxFeeds", "sanitizeFeeds", "addFeed", "setMaxFeeds", "firstPageLimit", "currentPageLimit", "replaceArticles", "loadMore", "appendMore", "maybeLoadMore",
+    "normalizeMaxFeeds", "sanitizeFeeds", "addFeed", "firstPageLimit", "currentPageLimit",
+    "replaceArticles", "phrasePool", "pickPhrase", "refreshedLabel", "caughtUpMessage", "spinnerGlyph", "loadingLabel", "listFooterText", "setMaxFeeds", "loadMore", "appendMore", "maybeLoadMore",
 ]
 
 
@@ -60,6 +61,7 @@ with (root) {{
         raise AssertionError(done.stderr)
     return json.loads(done.stdout)
 
+
 @unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")
 class FeedLimitTests(unittest.TestCase):
     def test_normalize_max_feeds_defaults_and_clamps(self):
@@ -89,15 +91,6 @@ class FeedLimitTests(unittest.TestCase):
     def test_save_config_persists_max_feeds_and_guards_shrinking(self):
         self.assertIn("maxFeeds: maxFeedsDraft,", PANEL)
         self.assertIn("if (feedModel.count > maxFeedsDraft) {", PANEL)
-
-    def test_emptying_the_feed_limit_field_keeps_the_draft(self):
-        got = run_js("""
-          maxFeedsDraft = 12; setMaxFeeds(''); const a = maxFeedsDraft;
-          setMaxFeeds('  '); const b = maxFeedsDraft;
-          setMaxFeeds('30'); const c = maxFeedsDraft;
-          return [a, b, c];
-        """)
-        self.assertEqual(got, [12, 12, 30])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")
@@ -210,6 +203,72 @@ class InfiniteScrollTests(unittest.TestCase):
         self.assertIn("onContentYChanged: root.maybeLoadMore()", PANEL)
         self.assertIn("id: moreProcess", PANEL)
         self.assertIn("onStreamFinished: root.appendMore(text)", PANEL)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")
+class DelightTests(unittest.TestCase):
+    def test_caught_up_message_rotates_daily_and_survives_bad_input(self):
+        got = run_js("return [0, 1, 5, 6, -1, 'x', undefined, 2, 3, 4].map(caughtUpMessage);")
+        self.assertEqual(got[0], "All caught up")
+        self.assertNotEqual(got[0], got[1])
+        self.assertEqual(got[6], got[0])        # garbage falls back to the first line
+        self.assertEqual(got[4], got[1])        # negative days still land on a line
+        self.assertEqual(len(set(got)), 7)      # 0,1,2,3,4,5,6 are all different lines
+
+    def test_spinner_animates_and_verbs_rotate(self):
+        got = run_js("""
+          const glyphs = Array.from({length: 8}, (_, i) => spinnerGlyph(i));
+          const labels = [0, 13, 14, 28].map((t) => loadingLabel(t, 0));
+          return { glyphs, wraps: spinnerGlyph(8) === glyphs[0], labels,
+                   seeded: loadingLabel(0, 3), junk: loadingLabel(undefined, 'x') };
+        """)
+        self.assertGreaterEqual(len(set(got["glyphs"])), 4)
+        self.assertTrue(got["wraps"])
+        self.assertTrue(got["labels"][0].endswith("Fetching…"))
+        self.assertTrue(got["labels"][1].endswith("Fetching…"))       # same verb within a step
+        self.assertTrue(got["labels"][2].endswith("Pondering…"))      # next verb after 14 ticks
+        self.assertTrue(got["labels"][3].endswith("Simmering…"))
+        self.assertTrue(got["seeded"].endswith("Herding feeds…"))
+        self.assertTrue(got["junk"].endswith("Fetching…"))
+        for label in got["labels"] + [got["seeded"]]:
+            self.assertTrue(label.isprintable())
+
+    def test_phrase_pools_are_big_unique_and_plain_text(self):
+        pools = run_js("return Object.fromEntries(['loading','caughtUp','refreshed','empty'].map((k) => [k, phrasePool(k)]));")
+        self.assertGreaterEqual(len(pools["loading"]), 30)
+        self.assertGreaterEqual(len(pools["caughtUp"]), 10)
+        self.assertGreaterEqual(len(pools["refreshed"]), 6)
+        for kind, lines in pools.items():
+            self.assertEqual(len(lines), len(set(lines)), f"duplicate line in {kind}")
+            for line in lines:
+                self.assertTrue(line.strip() and line.isprintable(), f"{kind}: {line!r}")
+                self.assertNotRegex(line, r"[\U0001F300-\U0001FAFF]", f"{kind}: color emoji in {line!r}")
+        self.assertEqual(run_js("return [phrasePool('nope'), pickPhrase('nope', 3)];"), [[], ""])
+
+    def test_refreshed_label_keeps_the_time_and_varies_with_the_seed(self):
+        got = run_js("return [0, 1, 2, 'x', -3].map((n) => refreshedLabel('14:02', n));")
+        self.assertTrue(all(line.endswith(" 14:02") for line in got))
+        self.assertEqual(len(set(got[:3])), 3)
+
+    def test_list_footer_says_what_is_happening(self):
+        got = run_js("""
+          const out = [];
+          moreAvailable = true; out.push(listFooterText(50));
+          loadingMore = true; spinnerTick = 1; out.push(listFooterText(50));
+          loadingMore = false; moreAvailable = false; out.push(listFooterText(1), listFooterText(7));
+          return out;
+        """)
+        self.assertEqual(got, ["Scroll for more", "✢ Loading more…", "1 article · that's everything",
+                               "7 articles · that's everything"])
+
+    def test_emptying_the_feed_limit_field_keeps_the_draft(self):
+        got = run_js("""
+          maxFeedsDraft = 12; setMaxFeeds(''); const a = maxFeedsDraft;
+          setMaxFeeds('  '); const b = maxFeedsDraft;
+          setMaxFeeds('30'); const c = maxFeedsDraft;
+          return [a, b, c];
+        """)
+        self.assertEqual(got, [12, 12, 30])
 
 
 if __name__ == "__main__":
