@@ -55,14 +55,37 @@ func TestTruncateCapsAtMaxFeedsAndReportsDrops(t *testing.T) {
 	for i := 0; i < MaxFeeds+3; i++ {
 		feeds = append(feeds, Feed{Name: "Feed", URL: "https://example.test/feed"})
 	}
-	kept, truncated := Truncate(feeds)
+	kept, truncated := Truncate(feeds, MaxFeeds)
 	if len(kept) != MaxFeeds || !truncated {
 		t.Fatalf("Truncate = (%d feeds, truncated=%v), want (%d, true)", len(kept), truncated, MaxFeeds)
 	}
 
-	kept, truncated = Truncate(feeds[:MaxFeeds])
+	kept, truncated = Truncate(feeds[:MaxFeeds], MaxFeeds)
 	if len(kept) != MaxFeeds || truncated {
 		t.Fatalf("Truncate at the limit = (%d feeds, truncated=%v), want (%d, false)", len(kept), truncated, MaxFeeds)
+	}
+}
+
+func TestTruncateHonoursACustomLimit(t *testing.T) {
+	feeds := make([]Feed, 20)
+	kept, truncated := Truncate(feeds, 12)
+	if len(kept) != 12 || !truncated {
+		t.Fatalf("Truncate(20, 12) = (%d, %v), want (12, true)", len(kept), truncated)
+	}
+	kept, truncated = Truncate(feeds, 20)
+	if len(kept) != 20 || truncated {
+		t.Fatalf("Truncate(20, 20) = (%d, %v), want (20, false)", len(kept), truncated)
+	}
+}
+
+func TestResolveMaxFeeds(t *testing.T) {
+	for configured, want := range map[int]int{
+		-5: MaxFeeds, 0: MaxFeeds, 1: 1, 8: 8, 25: 25,
+		FeedCeiling: FeedCeiling, FeedCeiling + 1: FeedCeiling, 1 << 30: FeedCeiling,
+	} {
+		if got := ResolveMaxFeeds(configured); got != want {
+			t.Errorf("ResolveMaxFeeds(%d) = %d, want %d", configured, got, want)
+		}
 	}
 }
 

@@ -11,10 +11,26 @@ import (
 	"strings"
 )
 
-// MaxFeeds is the maximum number of feeds Feader supports configuring at
-// once, matching the limit the Quickshell settings UI enforces when a feed
-// is added by hand.
-const MaxFeeds = 8
+const (
+	// MaxFeeds is how many feeds Feader lets you configure until the
+	// "maxFeeds" setting says otherwise.
+	MaxFeeds = 8
+	// FeedCeiling is the largest value the "maxFeeds" setting may take.
+	FeedCeiling = 100
+)
+
+// ResolveMaxFeeds turns a configured "maxFeeds" value into the effective
+// limit: MaxFeeds when unset or invalid, never above FeedCeiling. It mirrors
+// resolvedMaxFeeds in Panel.qml.
+func ResolveMaxFeeds(configured int) int {
+	if configured <= 0 {
+		return MaxFeeds
+	}
+	if configured > FeedCeiling {
+		return FeedCeiling
+	}
+	return configured
+}
 
 // Feed is the portable subset of a Feader feed configuration.
 type Feed struct {
@@ -23,14 +39,14 @@ type Feed struct {
 	Folder string `json:"folder,omitempty"`
 }
 
-// Truncate caps feeds at MaxFeeds, reporting whether any were dropped. It
-// keeps the first MaxFeeds entries so earlier feeds (e.g. those already
-// configured, when merging) are preserved over later ones.
-func Truncate(feeds []Feed) ([]Feed, bool) {
-	if len(feeds) <= MaxFeeds {
+// Truncate caps feeds at max, reporting whether any were dropped. It keeps
+// the first max entries so earlier feeds (e.g. those already configured, when
+// merging) are preserved over later ones.
+func Truncate(feeds []Feed, max int) ([]Feed, bool) {
+	if len(feeds) <= max {
 		return feeds, false
 	}
-	return feeds[:MaxFeeds], true
+	return feeds[:max], true
 }
 
 func isValidFeedURL(raw string) bool {

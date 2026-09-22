@@ -541,6 +541,32 @@ func TestCLIOPMLExportImportAndConfigHelpers(t *testing.T) {
 		t.Fatalf("OPML over-limit result = %#v", importResult)
 	}
 
+	// A raised "maxFeeds" in the config lets the whole document through.
+	raisedConfig := writeCLIFile(t, "raised-config.json", `{"maxFeeds": 12, "feeds": []}`)
+	stdout, stderr, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", raisedConfig, "--input", manyOPML})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("OPML import with maxFeeds=12: code=%d stderr=%q", code, stderr)
+	}
+	decodeCLIJSON(t, stdout, &importResult)
+	if importResult["total"] != float64(10) || importResult["truncated"] != false {
+		t.Fatalf("OPML import with maxFeeds=12 = %#v", importResult)
+	}
+
+	// A lowered one cuts it down, and the file keeps the setting.
+	loweredConfig := writeCLIFile(t, "lowered-config.json", `{"maxFeeds": 3}`)
+	stdout, _, code = captureCLI(t, func() int {
+		return run([]string{"opml-import", "--config", loweredConfig, "--input", manyOPML})
+	})
+	if code != 0 {
+		t.Fatalf("OPML import with maxFeeds=3: code=%d", code)
+	}
+	decodeCLIJSON(t, stdout, &importResult)
+	if importResult["total"] != float64(3) || importResult["truncated"] != true {
+		t.Fatalf("OPML import with maxFeeds=3 = %#v", importResult)
+	}
+
 	merged := mergeOPMLFeeds(
 		[]opml.Feed{{Name: "Existing", URL: "https://one.test/feed/"}},
 		[]opml.Feed{

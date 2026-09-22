@@ -215,7 +215,7 @@ func cmdOPMLImport(args []string) int {
 	if *merge {
 		feeds = mergeOPMLFeeds(current, feeds)
 	}
-	feeds, truncated := opml.Truncate(feeds)
+	feeds, truncated := opml.Truncate(feeds, opml.ResolveMaxFeeds(configuredMaxFeeds(config)))
 	encodedFeeds, err := json.Marshal(feeds)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -233,6 +233,15 @@ func cmdOPMLImport(args []string) int {
 		"truncated": truncated,
 		"config":    *configPath,
 	})
+}
+
+// configuredMaxFeeds reads the "maxFeeds" setting, 0 when absent or not a number.
+func configuredMaxFeeds(config map[string]json.RawMessage) int {
+	var value int
+	if err := json.Unmarshal(config["maxFeeds"], &value); err != nil {
+		return 0
+	}
+	return value
 }
 
 func readConfigForOPML(path string) (map[string]json.RawMessage, []opml.Feed, error) {
