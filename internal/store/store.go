@@ -441,6 +441,12 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 // capped at limit (0 or negative means no cap). Optional feed names scope the
 // result to the feeds currently configured by the caller.
 func (s *Store) List(limit int, feedNames ...string) ([]feed.Item, error) {
+	return s.ListPage(limit, 0, feedNames...)
+}
+
+// ListPage is List starting offset articles into the ordered result, which
+// lets a caller page through the archive.
+func (s *Store) ListPage(limit, offset int, feedNames ...string) ([]feed.Item, error) {
 	query := `
 		SELECT id, feed, title, url, published, published_at, summary, author, categories, read,
 			starred, tags,
@@ -453,10 +459,7 @@ func (s *Store) List(limit int, feedNames ...string) ([]feed.Item, error) {
 	}
 	query += " ORDER BY published_at DESC, first_seen DESC, id DESC"
 	args := filterArgs
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
-	}
+	query, args = paginate(query, args, limit, offset)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -485,17 +488,43 @@ func (s *Store) List(limit int, feedNames ...string) ([]feed.Item, error) {
 // content, authors, categories and user tags. Terms are quoted individually
 // so punctuation supplied by a user cannot become FTS5 syntax.
 func (s *Store) Search(query string, limit int) ([]feed.Item, error) {
-	return s.search(query, limit)
+	return s.search(query, limit, 0)
 }
 
 // SearchForFeeds is the feed-scoped form of Search used by the panel. The
 // separate method keeps the simple two-argument Search API convenient for
 // command-line and library callers.
 func (s *Store) SearchForFeeds(query string, limit int, feedNames ...string) ([]feed.Item, error) {
-	return s.search(query, limit, feedNames...)
+	return s.search(query, limit, 0, feedNames...)
 }
 
-func (s *Store) search(query string, limit int, feedNames ...string) ([]feed.Item, error) {
+// SearchPage is SearchForFeeds starting offset matches into the ordered result.
+func (s *Store) SearchPage(query string, limit, offset int, feedNames ...string) ([]feed.Item, error) {
+	return s.search(query, limit, offset, feedNames...)
+}
+
+// paginate appends LIMIT/OFFSET to an ordered query. SQLite only accepts
+// OFFSET after a LIMIT, so "no cap" is spelled LIMIT -1.
+func paginate(query string, args []any, limit, offset int) (string, []any) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 && offset == 0 {
+		return query, args
+	}
+	if limit <= 0 {
+		limit = -1
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+	if offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, offset)
+	}
+	return query, args
+}
+
+func (s *Store) search(query string, limit, offset int, feedNames ...string) ([]feed.Item, error) {
 	match := ftsMatchQuery(query)
 	if match == "" {
 		return []feed.Item{}, nil
@@ -514,10 +543,7 @@ func (s *Store) search(query string, limit int, feedNames ...string) ([]feed.Ite
 		args = append(args, filterArgs...)
 	}
 	sqlQuery += " ORDER BY a.published_at DESC, a.first_seen DESC, a.id DESC"
-	if limit > 0 {
-		sqlQuery += " LIMIT ?"
-		args = append(args, limit)
-	}
+	sqlQuery, args = paginate(sqlQuery, args, limit, offset)
 	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
 		return nil, err

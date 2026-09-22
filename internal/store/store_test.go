@@ -620,6 +620,77 @@ func TestIDForURL(t *testing.T) {
 	}
 }
 
+func TestListPageWalksTheArchiveWithoutGapsOrRepeats(t *testing.T) {
+	s := openTestStore(t)
+	var items []feed.Item
+	for i := 1; i <= 5; i++ {
+		items = append(items, feed.Item{ID: fmt.Sprintf("id%d", i), Feed: "F", Title: fmt.Sprintf("T%d", i),
+			URL: fmt.Sprintf("https://x/%d", i), Published: fmt.Sprintf("2024-01-0%d", i)})
+	}
+	if _, err := s.Upsert(items); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	all, err := s.List(0)
+	if err != nil || len(all) != 5 {
+		t.Fatalf("List(0) = %d items, err %v", len(all), err)
+	}
+
+	var paged []string
+	for offset := 0; ; offset += 2 {
+		page, err := s.ListPage(2, offset)
+		if err != nil {
+			t.Fatalf("ListPage(2, %d): %v", offset, err)
+		}
+		for _, it := range page {
+			paged = append(paged, it.ID)
+		}
+		if len(page) < 2 {
+			break
+		}
+	}
+	if len(paged) != len(all) {
+		t.Fatalf("paged %v, want %d ids", paged, len(all))
+	}
+	for i, it := range all {
+		if paged[i] != it.ID {
+			t.Fatalf("paged[%d] = %s, want %s", i, paged[i], it.ID)
+		}
+	}
+
+	// An offset with no limit skips rows and returns the rest.
+	rest, err := s.ListPage(0, 3)
+	if err != nil || len(rest) != 2 || rest[0].ID != all[3].ID {
+		t.Fatalf("ListPage(0, 3) = %v, err %v", rest, err)
+	}
+	// Past the end is empty, and a negative offset behaves like zero.
+	if past, err := s.ListPage(2, 99); err != nil || len(past) != 0 {
+		t.Fatalf("ListPage(2, 99) = %v, err %v", past, err)
+	}
+	if neg, err := s.ListPage(2, -4); err != nil || len(neg) != 2 || neg[0].ID != all[0].ID {
+		t.Fatalf("ListPage(2, -4) = %v, err %v", neg, err)
+	}
+}
+
+func TestSearchPagePagesMatches(t *testing.T) {
+	s := openTestStore(t)
+	var items []feed.Item
+	for i := 1; i <= 4; i++ {
+		items = append(items, feed.Item{ID: fmt.Sprintf("id%d", i), Feed: "F", Title: fmt.Sprintf("Rocket %d", i),
+			URL: fmt.Sprintf("https://x/%d", i), Published: fmt.Sprintf("2024-01-0%d", i)})
+	}
+	if _, err := s.Upsert(items); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	first, err := s.SearchPage("rocket", 3, 0)
+	if err != nil || len(first) != 3 {
+		t.Fatalf("SearchPage(3, 0) = %d items, err %v", len(first), err)
+	}
+	second, err := s.SearchPage("rocket", 3, 3)
+	if err != nil || len(second) != 1 || second[0].ID == first[0].ID || second[0].ID == first[2].ID {
+		t.Fatalf("SearchPage(3, 3) = %v, err %v", second, err)
+	}
+}
+
 func TestListReportsCachedFlag(t *testing.T) {
 	s := openTestStore(t)
 	items := []feed.Item{
