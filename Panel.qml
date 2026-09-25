@@ -50,6 +50,10 @@ Panel {
   property bool articleLoading: false
   property string articleContent: ""
   property string articleError: ""
+  // The article requested again while articleProcess was still busy with a
+  // previous one (it only runs one request at a time). Drained once that
+  // request settles; see drainQueuedArticle.
+  property var articleQueuedNext: null
   property string searchQuery: ""
   property string readFilter: "all"
   property string selectedFeed: ""
@@ -992,12 +996,28 @@ Panel {
   }
 
   function loadArticle(article) {
-    if (!article || !article.url || articleProcess.running) return
-    articleLoading = true
-    articleError = ""
-    articleContent = ""
+    if (!article || !article.url) return
+    if (articleProcess.running) {
+      // Only one process at a time; remember what the user actually wants
+      // and start it once the in-flight request settles (drainQueuedArticle).
+      articleQueuedNext = article
+      return
+    }
+    articleQueuedNext = null
     articleProcess.command = [fetchBinary, "article", "--db", dbPath, String(article.url)]
     articleProcess.running = true
+  }
+
+  // Called after articleProcess settles (from both onExited and
+  // onStreamFinished, in whichever order they actually fire for a given
+  // run) so a request queued mid-flight is never left waiting forever.
+  // loadArticle no-ops until articleProcess.running has actually gone false,
+  // so calling this from either signal handler is safe either way.
+  function drainQueuedArticle() {
+    if (!articleQueuedNext) return
+    var next = articleQueuedNext
+    articleQueuedNext = null
+    loadArticle(next)
   }
 
   function showArticle(article) {
@@ -1006,11 +1026,25 @@ Panel {
     selectedArticle = openedArticle
     tagDraft = Array.isArray(openedArticle.tags) ? openedArticle.tags.join(", ") : ""
     detailOpen = true
+    articleLoading = true
+    articleError = ""
+    articleContent = ""
     loadArticle(openedArticle)
   }
 
   function mergeArticle(raw) {
     var result = loadJson(raw, null)
+    drainQueuedArticle()
+
+    // feader-rss-fetch echoes the URL it fetched on both success and error,
+    // so the response identifies which request it belongs to on its own -
+    // no separate "which article is this for" bookkeeping (and no race with
+    // it) is needed to tell a stale response apart from the current one.
+    var responseUrl = result ? String(result.url || "") : ""
+    if (!selectedArticle || responseUrl === "" || String(selectedArticle.url || "") !== responseUrl) {
+      return
+    }
+
     articleLoading = false
     if (!result || result.error || !result.content) {
       articleError = result && result.error ? String(result.error) : "Could not load article"
@@ -1026,6 +1060,7 @@ Panel {
     articleLoading = false
     articleContent = ""
     articleError = ""
+    articleQueuedNext = null
   }
 
   function moveCursor(delta) {
@@ -1209,7 +1244,7 @@ Panel {
 
   Process {
     id: articleProcess
-    onExited: running = false
+    onExited: { running = false; root.drainQueuedArticle() }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.mergeArticle(text)

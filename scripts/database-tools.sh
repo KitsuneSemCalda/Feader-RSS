@@ -60,3 +60,31 @@ restore_database() {
   printf '%s\n' "Error: no Feader RSS backend or sqlite3 is available to restore ${input_path}." >&2
   return 1
 }
+
+# Imports a legacy items.json backup into an already-populated database.
+# Unlike copying items.json next to the database, this always runs the
+# migration: Store.autoMigrateLegacyState only fires on an empty database, so
+# a plain copy silently does nothing once the database already has articles.
+# Store.Import (used by the "migrate" subcommand) never overwrites an
+# existing article, so this only adds back rows missing from the live
+# database; it cannot restore a live edit made after the legacy backup.
+# There is no sqlite3 fallback: merging JSON items requires the Go import
+# logic, so callers must treat a non-zero return as "nothing was imported".
+import_legacy_items() {
+  local db_path="$1"
+  local input_path="$2"
+
+  if [[ -x "${fetch_binary}" ]]; then
+    "${fetch_binary}" migrate --db "${db_path}" --json "${input_path}"
+    return
+  fi
+
+  if [[ -f "${plugin_root}/go.mod" ]] && command -v go >/dev/null 2>&1; then
+    if (cd -- "${plugin_root}" && go run ./cmd/feader-rss-fetch migrate --db "${db_path}" --json "${input_path}"); then
+      return
+    fi
+  fi
+
+  printf '%s\n' "Error: no Feader RSS backend is available to import the legacy backup ${input_path} into ${db_path} (sqlite3 alone cannot merge JSON items)." >&2
+  return 1
+}

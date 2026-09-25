@@ -147,6 +147,49 @@ class BackupScriptTests(unittest.TestCase):
                 rows = restored_db.execute("SELECT id, title, content, read FROM articles").fetchall()
             self.assertEqual(rows, [("one", "Original", "Cached content", 1)])
 
+    def test_legacy_json_restore_merges_into_existing_database(self):
+        if self.backend is None:
+            self.skipTest("go toolchain not available to build feader-rss-fetch")
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            config_home = base / "config"
+            state_home = base / "state"
+            state_dir = state_home / "omarchy" / "rss-reader"
+            state_dir.mkdir(parents=True)
+            db_file = state_dir / "items.db"
+            env = self._env(config_home, state_home)
+
+            # A database that already has an article: autoMigrateLegacyState
+            # is a no-op once articles exist, which is exactly the condition
+            # under which a plain "cp items.json" used to silently do nothing.
+            current_json = base / "current.json"
+            current_json.write_text(json.dumps({
+                "items": [{"id": "current", "url": "https://one.test/current", "title": "Current", "feed": "Feed"}]
+            }))
+            subprocess.run(
+                [str(self.backend), "migrate", "--db", str(db_file), "--json", str(current_json)],
+                check=True, capture_output=True, text=True,
+            )
+
+            backup_dir = base / "legacy-backup"
+            backup_dir.mkdir()
+            (backup_dir / "items.json").write_text(json.dumps({
+                "items": [{"id": "old", "url": "https://one.test/old", "title": "Old", "feed": "Feed"}]
+            }))
+
+            restored = subprocess.run(
+                [str(ROOT / "scripts/restore.sh"), str(backup_dir)],
+                env=env, check=True, capture_output=True, text=True,
+            )
+            self.assertIn("Backup restored", restored.stdout)
+
+            listed = subprocess.run(
+                [str(self.backend), "list", "--db", str(db_file)],
+                check=True, capture_output=True, text=True,
+            )
+            ids = {item["id"] for item in json.loads(listed.stdout)["items"]}
+            self.assertEqual(ids, {"current", "old"})
+
 
 if __name__ == "__main__":
     unittest.main()

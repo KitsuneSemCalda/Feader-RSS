@@ -16,6 +16,7 @@ PANEL = (Path(__file__).parents[1] / "Panel.qml").read_text()
 FUNCTIONS = [
     "normalizeMaxFeeds", "sanitizeFeeds", "addFeed", "firstPageLimit", "currentPageLimit",
     "replaceArticles", "phrasePool", "pickPhrase", "refreshedLabel", "caughtUpMessage", "spinnerGlyph", "loadingLabel", "listFooterText", "setMaxFeeds", "loadMore", "appendMore", "maybeLoadMore",
+    "markRead", "persistMarkRead", "loadArticle", "drainQueuedArticle", "showArticle", "mergeArticle", "hideArticle",
 ]
 
 
@@ -45,6 +46,12 @@ const root = {{
   configuredFeedNamesArray: () => ["A", "B"],
   filterToConfiguredFeeds: (items) => items.filter((i) => i.feed !== "gone"),
   loadJson: (raw, fallback) => {{ try {{ return JSON.parse(raw); }} catch (e) {{ return fallback; }} }},
+  selectedArticle: null, detailOpen: false, tagDraft: "",
+  articleLoading: false, articleContent: "", articleError: "", articleQueuedNext: null,
+  articleProcess: {{ running: false, command: null }},
+  globalUnreadCount: -1,
+  Quickshell: {{ execDetached: () => {{}} }},
+  updateUnreadNotification: () => {{}},
 }};
 with (root) {{
   {lifted}
@@ -203,6 +210,69 @@ class InfiniteScrollTests(unittest.TestCase):
         self.assertIn("onContentYChanged: root.maybeLoadMore()", PANEL)
         self.assertIn("id: moreProcess", PANEL)
         self.assertIn("onStreamFinished: root.appendMore(text)", PANEL)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")
+class ArticleLoadingTests(unittest.TestCase):
+    def test_switching_article_mid_fetch_never_shows_the_old_articles_content(self):
+        # Reproduces: open A, then open B before A's fetch replies. The
+        # response for A must never be applied while B is selected, and B's
+        # own fetch must still run once A's settles.
+        got = run_js("""
+          const a = { id: "a", url: "https://x.test/a", title: "A" };
+          const b = { id: "b", url: "https://x.test/b", title: "B" };
+          const out = {};
+
+          showArticle(a);
+          out.commandAfterA = articleProcess.command.slice();
+
+          showArticle(b);
+          out.selectedAfterB = selectedArticle.id;
+          out.commandStillA = articleProcess.command.slice();
+          out.queuedIsB = articleQueuedNext && articleQueuedNext.id;
+
+          // A's response arrives while B is still selected and the process
+          // has not exited yet (running stays true, as Quickshell may fire
+          // onStreamFinished before onExited).
+          mergeArticle(JSON.stringify({ url: a.url, content: "content of A" }));
+          out.contentAfterStaleA = articleContent;
+          out.loadingAfterStaleA = articleLoading;
+
+          // The process now exits: onExited sets running=false and drains
+          // the queue.
+          articleProcess.running = false;
+          drainQueuedArticle();
+          out.commandAfterDrain = articleProcess.command.slice();
+
+          // B's response arrives.
+          mergeArticle(JSON.stringify({ url: b.url, content: "content of B" }));
+          out.finalSelected = selectedArticle.id;
+          out.finalContent = articleContent;
+          out.finalLoading = articleLoading;
+          return out;
+        """)
+        self.assertEqual(got["commandAfterA"][-1], "https://x.test/a")
+        self.assertEqual(got["selectedAfterB"], "b")
+        self.assertEqual(got["commandStillA"][-1], "https://x.test/a")
+        self.assertEqual(got["queuedIsB"], "b")
+        self.assertEqual(got["contentAfterStaleA"], "")
+        self.assertTrue(got["loadingAfterStaleA"])
+        self.assertEqual(got["commandAfterDrain"][-1], "https://x.test/b")
+        self.assertEqual(got["finalSelected"], "b")
+        self.assertEqual(got["finalContent"], "content of B")
+        self.assertFalse(got["finalLoading"])
+
+    def test_response_is_dropped_once_the_detail_panel_is_hidden(self):
+        got = run_js("""
+          const a = { id: "a", url: "https://x.test/a", title: "A" };
+          showArticle(a);
+          hideArticle();
+          mergeArticle(JSON.stringify({ url: a.url, content: "content of A" }));
+          return { selectedArticle, articleContent, detailOpen };
+        """)
+        self.assertIsNone(got["selectedArticle"])
+        self.assertEqual(got["articleContent"], "")
+        self.assertFalse(got["detailOpen"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is required to run Panel.qml logic")

@@ -32,6 +32,18 @@ chmod 700 "${state_dir}"
 
 if [[ -f "${backup_dir}/items.db" ]]; then
   restore_database "${db_file}" "${backup_dir}/items.db" >/dev/null
+elif [[ -f "${backup_dir}/items.json" ]]; then
+  if [[ -f "${db_file}" ]]; then
+    # The database already exists, so autoMigrateLegacyState (which only
+    # imports into an empty database) would silently skip these articles if
+    # we just copied the file next to it. Import them explicitly instead.
+    if ! import_legacy_items "${db_file}" "${backup_dir}/items.json"; then
+      printf '%s\n' "Error: could not import legacy backup ${backup_dir}/items.json; the current database was left untouched." >&2
+      exit 1
+    fi
+  else
+    cp -p "${backup_dir}/items.json" "${legacy_file}"
+  fi
 fi
 
 if [[ -f "${backup_dir}/rss-reader.json" ]]; then
@@ -39,9 +51,6 @@ if [[ -f "${backup_dir}/rss-reader.json" ]]; then
 fi
 if [[ -f "${backup_dir}/preferences.json" ]]; then
   cp -p "${backup_dir}/preferences.json" "${preferences_file}"
-fi
-if [[ -f "${backup_dir}/items.json" ]]; then
-  cp -p "${backup_dir}/items.json" "${legacy_file}"
 fi
 
 printf '%s\n' "Backup restored from ${backup_dir}"

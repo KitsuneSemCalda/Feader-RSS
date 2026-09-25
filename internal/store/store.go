@@ -221,6 +221,35 @@ func rebuildFTS(execer sqlExecer) error {
 	return err
 }
 
+// syncFTSRow brings the FTS index for a single article back in line with its
+// row in articles: reinserted if the row exists, removed if it doesn't (e.g.
+// after a delete or an id rename). Mutations that touch one or a handful of
+// articles call this per affected id instead of rebuildFTS, which redoes the
+// whole index and would otherwise make a single edit cost time proportional
+// to the entire archive; rebuildFTS stays reserved for repairing a
+// out-of-sync index (rebuildFTSIfOutOfSync) or a bulk migration.
+func syncFTSRow(tx *sql.Tx, id string) error {
+	var title, summary, content, author, categories, tags string
+	err := tx.QueryRow(`
+		SELECT title, summary, COALESCE(content, ''), author, categories, tags
+		FROM articles WHERE id = ?
+	`, id).Scan(&title, &summary, &content, &author, &categories, &tags)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if _, delErr := tx.Exec(`DELETE FROM articles_fts WHERE id = ?`, id); delErr != nil {
+		return delErr
+	}
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	_, err = tx.Exec(`
+		INSERT INTO articles_fts (id, title, summary, content, author, categories, tags)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, id, title, summary, content, author, categories, tags)
+	return err
+}
+
 func (s *Store) backfillPublishedAt() error {
 	rows, err := s.db.Query(`
 		SELECT id, published FROM articles
@@ -365,14 +394,17 @@ func (s *Store) MigrateArticleIdentity(feeds map[string]string) (int, error) {
 			if _, err := tx.Exec(`UPDATE articles SET id = ? WHERE id = ?`, newID, r.id); err != nil {
 				return 0, err
 			}
+			if err := syncFTSRow(tx, r.id); err != nil {
+				return 0, err
+			}
+			if err := syncFTSRow(tx, newID); err != nil {
+				return 0, err
+			}
 			migrated++
 		}
 	}
 	if migrated == 0 {
 		return 0, nil
-	}
-	if err := rebuildFTS(tx); err != nil {
-		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -424,12 +456,12 @@ func (s *Store) Upsert(items []feed.Item) ([]feed.Item, error) {
 		if err != nil {
 			return nil, fmt.Errorf("upserting article %s: %w", item.ID, err)
 		}
+		if err := syncFTSRow(tx, item.ID); err != nil {
+			return nil, fmt.Errorf("updating full-text search index for %s: %w", item.ID, err)
+		}
 		if !existing[item.ID] {
 			fresh = append(fresh, item)
 		}
-	}
-	if err := rebuildFTS(tx); err != nil {
-		return nil, fmt.Errorf("updating full-text search index: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -648,8 +680,10 @@ func (s *Store) Prune(maxItems int) (int, error) {
 	if _, err := tx.Exec(`DELETE FROM articles WHERE id IN (`+placeholders+`)`, args...); err != nil {
 		return 0, err
 	}
-	if err := rebuildFTS(tx); err != nil {
-		return 0, err
+	for _, id := range ids {
+		if err := syncFTSRow(tx, id); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -689,7 +723,7 @@ func (s *Store) SetContent(id, content string) error {
 	if _, err := tx.Exec(`UPDATE articles SET content = ?, prefetch_attempts = 0, prefetch_next_at = '', prefetch_error = '' WHERE id = ?`, content, id); err != nil {
 		return err
 	}
-	if err := rebuildFTS(tx); err != nil {
+	if err := syncFTSRow(tx, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -745,7 +779,7 @@ func (s *Store) SetTags(id string, tags []string) error {
 	if _, err := tx.Exec(`UPDATE articles SET tags = ? WHERE id = ?`, encodeTags(tags), id); err != nil {
 		return err
 	}
-	if err := rebuildFTS(tx); err != nil {
+	if err := syncFTSRow(tx, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -848,10 +882,10 @@ func (s *Store) Import(items []feed.Item) (imported int, err error) {
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			imported++
+			if err := syncFTSRow(tx, item.ID); err != nil {
+				return 0, fmt.Errorf("updating full-text search index for %s: %w", item.ID, err)
+			}
 		}
-	}
-	if err := rebuildFTS(tx); err != nil {
-		return 0, fmt.Errorf("updating full-text search index: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
